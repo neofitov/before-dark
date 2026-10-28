@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1322">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- Before Dark: the release build (tools/release.mjs) -->
+<title>Before Dark</title>
+  <!-- the 3D art slice: one level in the full look (three.js r170, MIT, in vendor/three; nothing loads from outside) -->
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three/build/three.module.min.js", "three/addons/": "./vendor/three/examples/jsm/" } }
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d1322; overflow: hidden; touch-action: none;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+    #hud { position: fixed; left: 0; right: 0; top: 0; padding: max(10px, env(safe-area-inset-top)) 12px 0; display: flex;
+      align-items: flex-start; justify-content: space-between; pointer-events: none; color: #fff; }
+    #hud .mid { text-align: center; text-shadow: 0 2px 6px rgba(0, 0, 0, 0.45); }
+    #level { font-weight: 800; font-size: 20px; letter-spacing: 0.5px; }
+    #moves { margin-top: 4px; font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 6px; justify-content: center; }
+    #moves .sun { width: 14px; height: 14px; border-radius: 50%; background: #ffe6a0; box-shadow: 0 0 10px #ffd27a; transition: background 0.6s, box-shadow 0.6s; }
+    #moves.low { color: #ffd2a0; }
+    #best { margin-top: 2px; font-size: 13px; opacity: 0.9; }
+    .btns { display: flex; gap: 8px; pointer-events: auto; }
+    .btn { width: 44px; height: 44px; border-radius: 14px; border: 0; background: rgba(20, 22, 40, 0.55); color: #fff; font-size: 20px;
+      font-weight: 800; display: grid; place-items: center; cursor: pointer; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25); }
+    .btn:active { transform: scale(0.94); }
+    .btn:disabled { opacity: 0.4; }
+    #hint { position: fixed; left: 50%; bottom: max(22px, env(safe-area-inset-bottom)); transform: translateX(-50%); color: #fff7e6;
+      font-weight: 700; font-size: 15px; text-align: center; text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6); pointer-events: none;
+      width: min(90vw, 420px); transition: opacity 0.6s; }
+    /* the end card sits at the bottom, under the camp the camera has pulled back to (it used to hide the camp in the middle) */
+    #card { position: fixed; inset: 0; display: none; align-items: flex-end; justify-content: center; pointer-events: none;
+      padding-bottom: max(14px, env(safe-area-inset-bottom)); background: linear-gradient(to top, rgba(8, 10, 24, 0.35), rgba(8, 10, 24, 0) 35%); }
+    #card .box { pointer-events: auto; }
+    #card.on { display: flex; }
+    #card .box { background: rgba(28, 24, 40, 0.88); color: #fff; border-radius: 22px; padding: 14px 22px 16px; text-align: center; min-width: 250px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45); transform: scale(0.8); opacity: 0; transition: transform 0.35s cubic-bezier(.2, 1.6, .4, 1), opacity 0.25s; }
+    #card.on .box { transform: scale(1); opacity: 1; }
+    #card h2 { margin: 0 0 2px; font-size: 21px; }
+    #card .stars { font-size: 28px; color: #ffd24a; letter-spacing: 4px; margin: 4px 0; text-shadow: 0 2px 10px rgba(255, 190, 60, 0.5); }
+    #card p { margin: 2px 0 12px; opacity: 0.9; }
+    #card .row { display: flex; gap: 10px; justify-content: center; }
+    #card button { border: 0; border-radius: 14px; padding: 12px 18px; font-size: 16px; font-weight: 800; color: #fff; background: #e9973a; cursor: pointer; }
+    #card button.alt { background: #6b5f80; }
+    /* a short screen (CrazyGames' smaller frames are 462 px tall): a compact card, so the camp above it stays big */
+    @media (max-height: 560px) {
+      #card .box { padding: 9px 16px 11px; min-width: 220px; }
+      #card h2 { font-size: 17px; }
+      #card .stars { font-size: 22px; margin: 0; }
+      #card p { margin: 0 0 8px; font-size: 14px; }
+      #card button { padding: 9px 14px; font-size: 15px; border-radius: 12px; }
+    }
+    #load { position: fixed; inset: 0; display: grid; place-items: center; color: #fff; font-weight: 700; background: #0d1322; transition: opacity 0.5s; }
+    #pills { position: fixed; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; }
+    #pills button { border: 0; border-radius: 999px; padding: 7px 12px;
+      font-size: 13px; font-weight: 700; color: #fff; background: rgba(20, 22, 40, 0.55); cursor: pointer; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+    @media (max-width: 420px) { #level { font-size: 17px; } #moves { font-size: 14px; } .btn { width: 40px; height: 40px; } #hint { bottom: 52px; } }
+    #hand { position: fixed; left: 0; top: 0; pointer-events: none; opacity: 0; z-index: 5; filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.45)); transform-origin: 14px 6px; }
+    #howto, #intro { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8, 10, 24, 0.45); padding: 16px; }
+    #howto.on, #intro.on { display: flex; }
+    #howto .box, #intro .box { background: rgba(32, 26, 44, 0.94); color: #fff; border-radius: 22px; padding: 20px 22px 18px; width: min(380px, 100%);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+    #howto h2, #intro h2 { margin: 0 0 12px; font-size: 22px; text-align: center; }
+    #howto .step, #intro .step { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 15px; line-height: 1.3; }
+    #howto .step svg, #intro .step svg { flex: none; width: 54px; height: 54px; }
+    #howto .legend, #intro .legend { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.15); display: grid; gap: 8px; }
+    #howto .row, #intro .row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+    #howto .chip, #intro .chip { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.25); }
+    #howto .chip img, #intro .chip img { width: 24px; height: 24px; }
+    #howto .go, #intro .go { display: block; margin: 14px auto 0; border: 0; border-radius: 14px; padding: 12px 26px; font-size: 16px; font-weight: 800; color: #fff; background: #e9973a; cursor: pointer; }
+    .new { display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 999px; background: #ffd24a; color: #3a2a10; font-size: 11px; font-weight: 800; vertical-align: 1px; }
+    #intro .camp { margin: 12px 0 4px; font-size: 14px; opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <div class="btns"><button class="btn" id="restart" title="Restart">↺</button><button class="btn" id="undo" title="Undo">↶</button></div>
+    <div class="mid"><div id="level">Level</div><div id="moves"><span class="sun"></span><span id="movesText"></span></div><div id="best"></div></div>
+    <div class="btns"><button class="btn" id="help" title="How to play">?</button><button class="btn" id="sound" title="Sound">♪</button></div>
+  </div>
+  <div id="hint"></div>
+  <div id="pills"><button id="weather" title="Change the weather (for the review)"></button></div>
+  <div id="howto"><div class="box">
+    <h2>How to play</h2>
+    <div class="step">
+      <svg viewBox="0 0 54 54"><rect x="6" y="16" width="26" height="22" rx="4" fill="#e0543a"/><path d="M10 23h18M10 31h18" stroke="#8a2f1f" stroke-width="2"/><path d="M36 27h12m-5-5 5 5-5 5" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div><b>Drag a crate</b> where you want it, round corners too: one drag is one move. Rocks, logs and other crates stop it.</div>
+    </div>
+    <div class="step">
+      <svg viewBox="0 0 54 54"><rect x="4" y="30" width="46" height="6" rx="2" fill="#9a6a3c"/><rect x="18" y="30" width="18" height="6" fill="#2a2235"/><rect x="13" y="14" width="5" height="22" rx="1" fill="#f05a3c"/><rect x="36" y="14" width="5" height="22" rx="1" fill="#f05a3c"/><path d="M18 14l9 4-9 4z" fill="#f05a3c"/><rect x="20" y="38" width="14" height="10" rx="2" fill="#e0543a"/><path d="M27 22v12" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>
+      <div><b>Push each crate out through the gate of its colour.</b> The flags show it; its camp spot waits outside.</div>
+    </div>
+    <div class="step">
+      <svg viewBox="0 0 54 54"><circle cx="16" cy="22" r="9" fill="#ffd27a"/><path d="M28 24h8m-3-3 3 3-3 3" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M46 14a10 10 0 1 0 2 15 8 8 0 0 1-2-15z" fill="#cdd6ff"/><text x="27" y="48" font-size="11" font-weight="800" fill="#fff" text-anchor="middle" font-family="system-ui">1 move</text></svg>
+      <div><b>Every move brings the night closer.</b> Get the camp ready before dark: the fewer moves, the more stars.</div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <button class="go" id="howtoGo">Let's go</button>
+  </div></div>
+  <div id="intro"><div class="box">
+    <h2 id="introTitle"></h2>
+    <div class="step">
+      <svg viewBox="0 0 54 54"><rect x="4" y="4" width="34" height="30" rx="3" fill="#dcc38e"/><path d="M15 4v30M26 4v30M4 14h34M4 24h34" stroke="#b49a68" stroke-width="1"/><rect x="13" y="16" width="10" height="7" rx="2" fill="#e0543a"/><rect x="10" y="33" width="3" height="9" rx="1" fill="#f05a3c"/><rect x="25" y="33" width="3" height="9" rx="1" fill="#f05a3c"/><g fill="#a77b4a"><rect x="12" y="34.5" width="14" height="2.4" rx="1"/><rect x="12" y="38.5" width="14" height="2.4" rx="1"/></g><circle cx="41" cy="40" r="4" fill="#ffd2a0"/><rect x="37" y="44" width="8" height="8" rx="2" fill="#4f7ac8"/><circle cx="47" cy="27" r="6" fill="#fff6e2" stroke="#3a2c4a" stroke-width="1.2"/><text x="47" y="29.6" font-size="7.5" font-weight="800" fill="#2a2238" text-anchor="middle" font-family="system-ui">2</text><text x="52.5" y="20" font-size="6" font-weight="800" fill="#5a7ad8" text-anchor="middle" font-family="system-ui">z</text></svg>
+      <div id="introRule"></div>
+    </div>
+    <div class="camp">Tonight's crates:</div>
+    <div class="legend" id="introLegend"></div>
+    <button class="go" id="introGo">Let's go</button>
+  </div></div>
+  <!-- the first level's teaching hand (main.js teach()) -->
+  <div id="hand"><svg viewBox="0 0 64 72" width="56" height="63"><path d="M22 8c0-4 7-4 7 0v24c0-3 7-3 7 0v4c0-3 7-3 7 0v4c0-3 7-3 7 0v14c0 9-6 14-15 14h-6c-6 0-9-3-12-8l-9-15c-2-4 3-7 6-4l8 9V8z" fill="#fff" stroke="#2a2235" stroke-width="3.5" stroke-linejoin="round"/></svg></div>
+  <div id="card"><div class="box"><h2 id="cardTitle"></h2><div class="stars" id="cardStars"></div><p id="cardText"></p><div class="row" id="cardBtns"></div></div></div>
+  <div id="load">Setting up camp…</div>
+  <script type="module" src="src/three/main.js"></script>
+</body>
+</html>

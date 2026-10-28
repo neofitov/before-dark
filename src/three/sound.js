@@ -1,0 +1,361 @@
+// Sounds of the 3D board: Kenney's CC0 wood and camp sounds (mp3, which iPhones play) through Web Audio, each play a little
+// off in pitch and volume so no two moves sound alike; and an evening made in code: birds while it is light, crickets as it
+// darkens, the fire's crackle growing with the fire, rain's hiss and the wind's gusts; and the camp's music (music.js), which
+// the game's moments join in key: a note for each crate home, rising; a tune for the win. Each trade sounds like its work
+// (stones for the fire, a mallet and canvas for the tent, a hammer on planks, a splash, coins and a ledger, blankets).
+// Nothing plays before the first touch (browsers' autoplay rule) and nothing here ever throws. No creaks or door sounds
+// (Oleg hates them) and no sliding scrape.
+import { makeMusic } from './music.js';
+
+const FILES = {
+  pick: ['pick1', 'pick2', 'pick3'], drop: ['drop1', 'drop2', 'drop3'], heavy: ['heavy1'], bump: ['bump1', 'bump2'],
+  cloth: ['cloth1', 'cloth2', 'cloth3', 'cloth4'], coins: ['coins1', 'coins2'], latch: ['latch1'], chop: ['chop1'], leather: ['leather1'], pot: ['pot1'],
+  stone: ['stone1', 'stone2', 'stone3'], thud: ['thud1', 'thud2', 'thud3'], tap: ['tap1', 'tap2', 'tap3'], plank: ['plank1', 'plank2'],
+  soft: ['soft1', 'soft2'], glass: ['glass1'], book: ['book1', 'book2'], click: ['click1'],
+};
+const buf = {};
+// a sound's file, found from this module (so tools' pages load them too)
+const file = (n) => new URL(`../../assets/sfx3d/${n}.mp3`, import.meta.url);
+let ac = null, out = null, weather = null, amb = null, music = null, muted = false, dusk = 0, musicDusk = -1, fire = 0.3, nextBird = 0, nextCricket = 0, nextCrackle = 0;
+try {
+  muted = localStorage.getItem('bd.muted') === '1';
+} catch {}
+
+export const isMuted = () => muted;
+
+export function toggleMute() {
+  muted = !muted;
+  try {
+    localStorage.setItem('bd.muted', muted ? '1' : '0');
+  } catch {}
+  if (out) out.gain.setTargetAtTime(muted ? 0 : 1, ac.currentTime, 0.05);
+}
+
+// ?playtest (simulated players, checks) never makes a sound: those tabs run on Oleg's PC
+const silent = /[?&](playtest|silent)\b/.test(location.search);
+
+// call from a touch or click: makes (or resumes) the audio context and loads the sounds once
+export function wake() {
+  if (silent) return;
+  try {
+    if (ac) {
+      if (ac.state !== 'running') ac.resume();
+      return;
+    }
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    out = ac.createGain();
+    out.gain.value = muted ? 0 : 1;
+    out.connect(ac.destination);
+    amb = ac.createGain();
+    amb.gain.value = 0.5;
+    amb.connect(out);
+    for (const list of Object.values(FILES)) {
+      for (const n of list) {
+        fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => ac.decodeAudioData(b)).then((d) => (buf[n] = d)).catch(() => {});
+      }
+    }
+    weather = makeWeatherLoops();
+    const mg = ac.createGain();
+    mg.gain.value = 0.34;
+    mg.connect(out);
+    music = makeMusic(ac, mg);
+  } catch {
+    ac = null;
+  }
+}
+
+// one of the named sound's variants; vol 0..1, rate around 1, both jittered
+export function play(name, vol = 0.6, rate = 1, delay = 0) {
+  if (!ac || muted) return;
+  const list = FILES[name];
+  const b = list && buf[list[Math.floor(Math.random() * list.length)]];
+  if (!b) return;
+  try {
+    const s = ac.createBufferSource(), g = ac.createGain();
+    s.buffer = b;
+    s.playbackRate.value = rate * (0.92 + Math.random() * 0.16);
+    g.gain.value = vol * (0.85 + Math.random() * 0.3);
+    s.connect(g).connect(out);
+    s.start(ac.currentTime + delay);
+  } catch {}
+}
+
+// a soft tone or chord made in code (the camp's cheers); notes in Hz
+export function chime(notes, vol = 0.18, len = 0.5, delay = 0) {
+  if (!ac || muted) return;
+  try {
+    notes.forEach((f, k) => {
+      const t = ac.currentTime + delay + k * 0.07, o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0008, t + len);
+      o.connect(g).connect(out);
+      o.start(t);
+      o.stop(t + len + 0.05);
+    });
+  } catch {}
+}
+
+function noiseBuffer(seconds) {
+  const b = ac.createBuffer(1, Math.floor(ac.sampleRate * seconds), ac.sampleRate), d = b.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < d.length; i++) {
+    last = last * 0.6 + (Math.random() * 2 - 1) * 0.4;   // a little brown: wood on sand, not hiss
+    d[i] = last;
+  }
+  return b;
+}
+
+// two looped noises: rain (a soft hiss) and wind (a low rush), both silent until the weather turns them up
+function makeWeatherLoops() {
+  const loop = (type, freq, q) => {
+    const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = noiseBuffer(3);
+    s.loop = true;
+    f.type = type;
+    f.frequency.value = freq;
+    f.Q.value = q;
+    g.gain.value = 0;
+    s.connect(f).connect(g).connect(amb);
+    s.start(0, Math.random() * 2);
+    return { f, g };
+  };
+  return { rain: loop('bandpass', 2600, 0.5), wind: loop('lowpass', 420, 0.7) };
+}
+
+// rain 0..1, wind 0..1
+export function setWeather(rain, windK) {
+  if (!weather) return;
+  weather.rain.g.gain.setTargetAtTime(rain * 0.35, ac.currentTime, 0.3);
+  weather.wind.g.gain.setTargetAtTime(Math.min(windK, 1) * 0.5, ac.currentTime, 0.4);
+  weather.wind.f.frequency.setTargetAtTime(300 + windK * 500, ac.currentTime, 0.4);
+}
+
+// a soft tick as a crate passes over a tile's edge (wood on wood, quiet)
+export function cellTick(speed = 1) {
+  play('pick', 0.09 + Math.min(speed, 6) * 0.015, 1.5);
+}
+
+// the evening: t 0 (afternoon) .. 1 (night); f the fire's size 0..1
+export function setEvening(t, f) {
+  dusk = t;
+  fire = f;
+}
+
+export function tick() {
+  if (!ac || muted || ac.state !== 'running') return;
+  const now = ac.currentTime;
+  if (music) {
+    music.schedule(now + 0.8);
+    if (Math.abs(dusk - musicDusk) > 0.03) music.setDusk((musicDusk = dusk));
+  }
+  if (now > nextBird) {
+    nextBird = now + 1.2 + Math.random() * 3 + dusk * 6;
+    if (Math.random() > dusk * 1.1) bird(now);
+  }
+  if (now > nextCricket) {
+    nextCricket = now + 0.55 + Math.random() * 0.5;
+    if (dusk > 0.35) cricket(now, Math.min((dusk - 0.35) * 1.6, 1));
+  }
+  if (now > nextCrackle) {
+    nextCrackle = now + 0.05 + Math.random() * (0.5 - fire * 0.35);
+    crackle(now, 0.25 + fire * 0.75);
+  }
+}
+
+function bird(t) {
+  const n = 2 + Math.floor(Math.random() * 3), base = 2600 + Math.random() * 1400;
+  for (let k = 0; k < n; k++) {
+    const t0 = t + k * (0.09 + Math.random() * 0.05), o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(base, t0);
+    o.frequency.exponentialRampToValueAtTime(base * (1.25 + Math.random() * 0.4), t0 + 0.06);
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(0.025, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0005, t0 + 0.08);
+    o.connect(g).connect(amb);
+    o.start(t0);
+    o.stop(t0 + 0.1);
+  }
+}
+
+function cricket(t, k) {
+  for (let p = 0; p < 3; p++) {
+    const t0 = t + p * 0.045, o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sine';
+    o.frequency.value = 4300 + Math.random() * 120;
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(0.012 * k, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0002, t0 + 0.03);
+    o.connect(g).connect(amb);
+    o.start(t0);
+    o.stop(t0 + 0.04);
+  }
+}
+
+let crackleBuf = null;
+function crackle(t, k) {
+  if (!crackleBuf) crackleBuf = noiseBuffer(0.2);
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = crackleBuf;
+  f.type = 'highpass';
+  f.frequency.value = 1800 + Math.random() * 2500;
+  g.gain.setValueAtTime(0.05 * k * Math.random(), t);
+  g.gain.exponentialRampToValueAtTime(0.0003, t + 0.015 + Math.random() * 0.03);
+  s.connect(f).connect(g).connect(amb);
+  s.start(t, Math.random() * 0.15, 0.05);
+}
+
+// ---- the game's moments ----
+
+// air: a crate thrown out through its gate (up), or pulled back by an undo (down)
+export function whoosh(up = true, vol = 0.18, delay = 0) {
+  if (!ac || muted) return;
+  try {
+    const t = ac.currentTime + delay, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = noiseBuffer(0.5);
+    f.type = 'bandpass';
+    f.Q.value = 1.2;
+    f.frequency.setValueAtTime(up ? 380 : 1800, t);
+    f.frequency.exponentialRampToValueAtTime(up ? 2200 : 320, t + 0.32);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol, t + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + 0.4);
+    s.connect(f).connect(g).connect(out);
+    s.start(t);
+  } catch {}
+}
+
+// water: a slosh and a few bubbles
+export function splash(vol = 0.3, delay = 0) {
+  if (!ac || muted) return;
+  try {
+    const t = ac.currentTime + delay, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = noiseBuffer(0.6);
+    f.type = 'bandpass';
+    f.frequency.setValueAtTime(900, t);
+    f.frequency.exponentialRampToValueAtTime(420, t + 0.35);
+    f.Q.value = 0.8;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + 0.45);
+    s.connect(f).connect(g).connect(out);
+    s.start(t);
+    for (let k = 0; k < 4; k++) {
+      const t0 = t + 0.08 + k * (0.05 + Math.random() * 0.06), o = ac.createOscillator(), og = ac.createGain(), f0 = 500 + Math.random() * 600;
+      o.frequency.setValueAtTime(f0, t0);
+      o.frequency.exponentialRampToValueAtTime(f0 * 1.9, t0 + 0.05);
+      og.gain.setValueAtTime(0, t0);
+      og.gain.linearRampToValueAtTime(vol * 0.25, t0 + 0.008);
+      og.gain.exponentialRampToValueAtTime(0.0005, t0 + 0.06);
+      o.connect(og).connect(out);
+      o.start(t0);
+      o.stop(t0 + 0.08);
+    }
+  } catch {}
+}
+
+// a stage of a trade's work: each sounds like what it does
+export function build(kind) {
+  if (kind === 'fire') {
+    play('stone', 0.45);
+    play('stone', 0.35, 1, 0.14);
+  } else if (kind === 'tent') {
+    play('thud', 0.4);
+    play('thud', 0.35, 1, 0.2);
+    play('cloth', 0.3, 1, 0.4);
+  } else if (kind === 'bench') {
+    play('tap', 0.3);
+    play('tap', 0.3, 1, 0.15);
+    play('plank', 0.35, 1, 0.34);
+  } else if (kind === 'water') {
+    splash(0.28);
+    play('drop', 0.25, 1.2, 0.05);
+  } else if (kind === 'chest') {
+    play('coins', 0.35);
+    play('book', 0.35, 1, 0.22);
+  } else if (kind === 'beds') {
+    play('cloth', 0.4);
+    play('soft', 0.35, 1, 0.2);
+  } else play('chop', 0.3, 1.15);
+}
+
+// a crate home on its gate's mat: a string of the music's chord, higher with each crate of the level
+export function home(n) {
+  if (!ac || muted || !music) return;
+  try {
+    const c = music.chordNow(), top = c.slice(2), up = [...top, ...top.map((m) => m + 12), ...top.map((m) => m + 24)];
+    music.phrase([up[Math.min(n, up.length - 1)]], ac.currentTime + 0.02, 0, 0.5);
+  } catch {}
+}
+
+// the game's ends and the camp's moments, in the music's key (D major)
+export function jingle(kind, delay = 0) {
+  if (!ac || muted || !music) return;
+  try {
+    const t = ac.currentTime + 0.03 + delay;
+    if (kind === 'win') {
+      music.phrase([62, 66, 69, 74, 78, 81], t, 0.12, 0.55);
+      music.whistle(86, t + 0.8, 0.9, 0.05);
+      play('glass', 0.25, 1.4, 0.75 + delay);
+    } else if (kind === 'done') {
+      music.phrase([69, 74, 78, 81], t, 0.1, 0.45);
+      play('glass', 0.18, 1.6, 0.35 + delay);
+    } else if (kind === 'lose') music.phrase([69, 65, 62, 57], t, 0.22, 0.45);
+    else if (kind === 'start') music.phrase([50, 54, 57, 62, 66], t, 0.05, 0.35);
+  } catch {}
+}
+
+// an owl, as a crew goes to bed: hoo... hoo-hoo
+export function owl(delay = 0.3) {
+  if (!ac || muted) return;
+  try {
+    [0, 0.55, 0.78].forEach((d, k) => {
+      const t = ac.currentTime + delay + d, o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain(), len = k ? 0.2 : 0.42;
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(410, t);
+      o.frequency.linearRampToValueAtTime(370, t + len);
+      f.type = 'lowpass';
+      f.frequency.value = 900;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.07, t + 0.06);
+      g.gain.exponentialRampToValueAtTime(0.0005, t + len + 0.1);
+      o.connect(f).connect(g).connect(amb);
+      o.start(t);
+      o.stop(t + len + 0.15);
+    });
+  } catch {}
+}
+
+// a bedtime gate swung shut: wood against the post, then the latch
+export function gateShut() {
+  play('thud', 0.5, 0.9);
+  play('click', 0.35, 1, 0.12);
+}
+
+// for previews (tools/sound-preview.html): run the sounds on another audio context (an OfflineAudioContext) and its loaded
+// buffers, then back
+export async function borrow(ctx, files = true) {
+  const keep = { ac, out, amb, music, muted };
+  ac = ctx;
+  out = ctx.createGain();
+  out.connect(ctx.destination);
+  amb = ctx.createGain();
+  amb.gain.value = 0.5;
+  amb.connect(out);
+  muted = false;
+  const mg = ctx.createGain();
+  mg.gain.value = 0.34;
+  mg.connect(out);
+  music = makeMusic(ctx, mg);
+  if (files) {
+    await Promise.all(Object.values(FILES).flat().map((n) => fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b)).then((d) => (buf[n] = d)).catch(() => {})));
+  }
+  return {
+    music,
+    back() {
+      ({ ac, out, amb, music, muted } = keep);
+    },
+  };
+}
