@@ -46,8 +46,12 @@ export function buildBoard(scene, models, L, opts = {}) {
     for (let x = 0; x < W; x++) {
       const k = y * W + x;
       m4.makeTranslation(ox + x + 0.5, -0.06, oz + y + 0.5);
+      // a rock's or stump's cell is bare dark earth, so blocked cells read at a glance on a big board (benchmark 2026-10-28);
+      // the pond's cells have water instead of a tile
+      const wall = L.walls.some(([wx, wy]) => wx === x && wy === y), wet = (L.pond || []).some(([px, py]) => px === x && py === y);
+      if (wet) m4.makeScale(0.001, 0.001, 0.001).setPosition(ox + x + 0.5, -0.2, oz + y + 0.5);
       tiles.setMatrixAt(k, m4);
-      col.set('#dcc38e').offsetHSL((r.next() - 0.5) * 0.02, (r.next() - 0.5) * 0.06, (r.next() - 0.5) * 0.07);
+      col.set(wall ? '#7a5c3a' : '#dcc38e').offsetHSL((r.next() - 0.5) * 0.02, (r.next() - 0.5) * 0.06, (r.next() - 0.5) * 0.07);
       tiles.setColorAt(k, col);
     }
   }
@@ -80,9 +84,13 @@ export function buildBoard(scene, models, L, opts = {}) {
     group.add(p);
   }
 
+  // a pond in a corner (2026-10-28, odd boards): water where its tiles would be, lily pads, reeds along its edges
+  if (L.pond) addPond(group, L.pond, ox, oz, r);
+
   // walls: rocks and stumps fitted to their cell
   const wallModels = ['Rock_Medium_1', 'stump_round', 'Rock_Medium_3', 'Rock_Medium_2', 'stump_old'];
   for (const [x, y] of L.walls) {
+    if ((L.pond || []).some(([px, py]) => px === x && py === y)) continue;
     const name = wallModels[(x * 7 + y * 3) % wallModels.length], m = models.get(name);
     if (!m) continue;
     const f = fitted(m, name.startsWith('stump') ? 0.7 : 0.92);
@@ -100,22 +108,54 @@ export function buildBoard(scene, models, L, opts = {}) {
     const mid = along ? [ox + g.at + g.len / 2, g.side === 'top' ? oz : oz + H] : [g.side === 'left' ? ox : ox + W, oz + g.at + g.len / 2];
     // the posts stand just outside the opening (a crate as wide as the gate passes between them)
     const ends = along ? [[ox + g.at - 0.17, mid[1]], [ox + g.at + g.len + 0.17, mid[1]]] : [[mid[0], oz + g.at - 0.17], [mid[0], oz + g.at + g.len + 0.17]];
-    const paintPost = new THREE.MeshStandardMaterial({ color: s.flag, roughness: 0.6 });
+    // a gate on the far side has taller poles: its banner hangs under the flags (below)
+    const far = g.side === 'top', poleLen = far ? 1.35 : 0.9;
     for (const [ex, ez] of ends) {
-      // painted gate posts in the gate's colour, a pennant on each
-      const post = new THREE.Mesh(new RoundedBoxGeometry(0.32, 0.8, 0.32, 2, 0.07), paintPost);
+      // gate posts in dark wood, a pennant on each: the gate's colour marks only the opening itself (playtest 2026-10-29:
+      // posts painted in it, outside the opening, made a gate look a cell wider than it is)
+      const post = new THREE.Mesh(new RoundedBoxGeometry(0.32, 0.8, 0.32, 2, 0.07), woodDark);
       post.position.set(ex + out[0] * 0.12, GROUND + 0.4, ez + out[1] * 0.12);
       post.castShadow = post.receiveShadow = true;
       group.add(post);
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.9, 8), woodDark);
-      pole.position.set(post.position.x, GROUND + 1.2, post.position.z);
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, poleLen, 8), woodDark);
+      pole.position.set(post.position.x, GROUND + 0.75 + poleLen / 2, post.position.z);
       pole.castShadow = true;
       group.add(pole);
       const flag = makeFlag(s.flag);
-      flag.position.set(pole.position.x, GROUND + 1.48, pole.position.z);
+      flag.position.set(pole.position.x, GROUND + 0.58 + poleLen, pole.position.z);
       flag.rotation.y = -0.35;   // one wind for all, blowing to the right and a little towards the viewer: every flag shows its face
       group.add(flag);
       flags.push(flag);
+    }
+    // a gate on the far side carries a banner (playtest 2026-10-29: a crate on the top row hid the threshold and the paint of
+    // the gate behind it, and three of five players planned on a gate they could not see): the supply's sign on a board exactly
+    // the opening's width, standing on a rod between the poles higher than a crate and leaning back, away from the board, to
+    // face the camera. From the camera it shows over the crates in front of it; behind them, it never covers one.
+    if (far) {
+      const h = 0.55, cv = document.createElement('canvas'), px = 128;
+      cv.width = Math.round(px * g.len);
+      cv.height = Math.round(px * h);
+      const c2 = cv.getContext('2d'), hem = 8, ic = (cv.height - hem) * 0.8;
+      c2.fillStyle = s.flag;
+      c2.fillRect(0, 0, cv.width, cv.height);
+      c2.fillStyle = 'rgba(0, 0, 0, 0.22)';
+      c2.fillRect(0, cv.height - hem, cv.width, hem);
+      c2.strokeStyle = 'rgba(255, 246, 226, 0.6)';
+      c2.lineWidth = 4;
+      c2.strokeRect(7, 6, cv.width - 14, cv.height - hem - 12);
+      c2.drawImage(stencilCanvas(s.icon, false), (cv.width - ic) / 2, (cv.height - hem - ic) / 2, ic, ic);
+      const map = new THREE.CanvasTexture(cv);
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.anisotropy = 4;
+      const rodY = GROUND + 1.17, banner = new THREE.Group();
+      banner.position.set(mid[0], rodY, mid[1] - 0.12);
+      const cloth = new THREE.Mesh(new THREE.PlaneGeometry(g.len - 0.04, h).translate(0, h / 2, 0), new THREE.MeshStandardMaterial({ map, roughness: 0.85, side: THREE.DoubleSide, emissive: s.flag, emissiveIntensity: 0.15 }));
+      cloth.rotation.x = -0.9;   // its top leaning back, away from the board: it faces up to the camera
+      cloth.castShadow = true;
+      const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, g.len + 0.34, 8).rotateZ(Math.PI / 2), woodDark);
+      rod.castShadow = true;
+      banner.add(cloth, rod);
+      group.add(banner);
     }
     // where the crates land and the gate's worker waits (no mat: the gate's colours say enough, Oleg 2026-10-24)
     const spotPos = new THREE.Vector3(mid[0] + out[0] * 1.4, GROUND, mid[1] + out[1] * 1.4);
@@ -165,7 +205,8 @@ export function buildBoard(scene, models, L, opts = {}) {
     // folded back flat along the outside of the frame; its worker swings it shut across the opening (camp.js). (Pointing
     // straight out, the open leaf ran into the campfire, 2026-10-24.) It hinges on the post with room beside it: not across
     // another gate on that side, and if it can be helped, not out past the board's corner.
-    if (g.closeAt != null) {
+    // A crew back late (2026-10-28) has the same leaf, shut until its worker comes back and swings it open.
+    if (g.closeAt != null || g.openAt != null) {
       const len = g.len + 0.34, pivot = new THREE.Group(), leaf = new THREE.Group(), span = along ? W : H;
       const others = L.gates.filter((o) => o !== g && o.side === g.side).map((o) => [o.at - 0.4, o.at + o.len + 0.4]);
       const cost = (a, b) => (others.some(([c, d]) => a < d && c < b) ? 2 : 0) + (a < -0.3 || b > span + 0.3 ? 1 : 0);
@@ -211,17 +252,18 @@ export function buildBoard(scene, models, L, opts = {}) {
         pivot.rotation.y = open + (shut - open) * k;
         band.color.copy(railOpen).lerp(railShut, k);
       };
-      door.set(0);
+      door.set(g.openAt != null ? 1 : 0);
       doors[g.color] = door;
     }
     // the gate's mat is where its crates land and its worker waits (the camp itself is built round the board: camp.js)
-    if (!spots[g.color]) spots[g.color] = { pos: spotPos, gateMid: new THREE.Vector3(mid[0], 0, mid[1]), out: new THREE.Vector3(out[0], 0, out[1]), side: new THREE.Vector3(-out[1], 0, out[0]), total: 0, got: 0 };
+    if (!spots[g.color]) spots[g.color] = { pos: spotPos, gateMid: new THREE.Vector3(mid[0], 0, mid[1]), out: new THREE.Vector3(out[0], 0, out[1]), side: new THREE.Vector3(-out[1], 0, out[0]), len: g.len, total: 0, got: 0 };
   }
   for (const b of L.blocks) if (spots[b.color]) spots[b.color].total++;
 
   // while a crate is held, its gate's lane lights up: a band across the board exactly the gate's width, brightest at the
-  // gate, its edges drawn, over the crates in it, so which rows (or columns) lead out reads at a glance (playtest
-  // 2026-10-24: all four players misread which rows a gate covers; tinted cells alone were hidden under the crates)
+  // gate, its edges drawn, so which rows (or columns) lead out reads at a glance (playtest 2026-10-24: all four players
+  // misread which rows a gate covers). It lies on the floor, under the crates in it: gate marks never hide a crate (Oleg,
+  // 2026-10-29)
   const fade = (() => {
     const cv = document.createElement('canvas');
     cv.width = 4;
@@ -238,8 +280,8 @@ export function buildBoard(scene, models, L, opts = {}) {
   for (const g of L.gates) {
     const along = g.side === 'top' || g.side === 'bottom', wide = g.len, long = along ? H : W;
     const color = SUPPLY[g.color].flag, lane = new THREE.Group();
-    const fill = new THREE.MeshBasicMaterial({ color, alphaMap: fade, transparent: true, opacity: 0, depthTest: false, depthWrite: false });
-    const edge = new THREE.MeshBasicMaterial({ color: new THREE.Color(color).lerp(new THREE.Color('#ffffff'), 0.35), transparent: true, opacity: 0, depthTest: false, depthWrite: false });
+    const fill = new THREE.MeshBasicMaterial({ color, alphaMap: fade, transparent: true, opacity: 0, depthWrite: false });
+    const edge = new THREE.MeshBasicMaterial({ color: new THREE.Color(color).lerp(new THREE.Color('#ffffff'), 0.35), transparent: true, opacity: 0, depthWrite: false });
     // laid out with the gate at local -z: the alpha map's bright end (v = 1) there
     const band = new THREE.Mesh(new THREE.PlaneGeometry(wide - 0.06, long).rotateX(-Math.PI / 2), fill);
     lane.add(band);
@@ -275,7 +317,7 @@ export function buildBoard(scene, models, L, opts = {}) {
         f.mesh.scale.set(side ? 0.3 : 1, 1, side ? 1 : 0.3);
         f.mesh.position.set(side ? (x < 0 ? ox - 0.12 : ox + W + 0.12) : ox + x + 0.5, GROUND + 0.48, side ? oz + y + 0.5 : y < 0 ? oz - 0.12 : oz + H + 0.12);
       }
-      f.t = 0.55;
+      f.t = 0.9;
     }
   }
   // each frame: the held crate's colour (or null) lights its gate's lane
@@ -291,14 +333,16 @@ export function buildBoard(scene, models, L, opts = {}) {
     for (const f of flashes) {
       if (f.t <= 0) continue;
       f.t -= dt;
-      f.mesh.material.opacity = Math.max(0, f.t / 0.55) * 0.6;
+      f.mesh.material.opacity = Math.max(0, f.t / 0.9) * 0.75;
     }
   }
 
   return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
 }
 
-export function buildCrate(models, b) {
+// opts: key (this crate holds the key to a padlocked one), lockColor (padlocked: the colour of the crate with its key), mark
+// (a level with two padlocks or more: the number a lock and its key both carry)
+export function buildCrate(models, b, opts = {}) {
   const s = SUPPLY[b.color], g = new THREE.Group(), body = new THREE.Group();
   const w = b.w - 0.12, d = b.h - 0.12;
   const mat = crateMaterial(s.paint, b.w >= b.h);
@@ -315,13 +359,148 @@ export function buildCrate(models, b) {
     body.add(st);
   }
   shadows(body);
-  // what it carries, stencilled on the lid (a flame, a tent, a drop of water...)
-  const size = Math.min(0.62, Math.min(w, d) * 0.72), decal = new THREE.Mesh(new THREE.PlaneGeometry(size, size), stencilMaterial(s.icon));
-  decal.rotation.x = -Math.PI / 2;
-  decal.position.y = CRATE_H + 0.004;
-  body.add(decal);
+  // what it carries, stencilled on the lid (a flame, a tent, a drop of water...); a long load at both ends
+  // (smaller on a short heavy crate, between its arrows)
+  const size = Math.min(0.62, Math.min(w, d) * 0.72) * (b.axis && (b.axis === 'x' ? b.w : b.h) < 2 ? 0.6 : 1), ends = long >= 3.5 ? [-0.95, 0.95] : [0];
+  for (const e of ends) {
+    const decal = new THREE.Mesh(new THREE.PlaneGeometry(size, size), stencilMaterial(s.icon));
+    decal.rotation.x = -Math.PI / 2;
+    decal.position.set(across ? e : 0, CRATE_H + 0.004, across ? 0 : e);
+    body.add(decal);
+  }
+  const out = { group: g, body };
+  // heavy, on runners (2026-10-28): two iron-shod skids along the way it slides, turned up at the ends, and a painted arrow
+  // at each end of the lid pointing along it
+  if (b.axis) {
+    const ax = b.axis === 'x', runLen = (ax ? w : d) + 0.26, spread = (ax ? d : w) / 2 - 0.09;
+    const iron = new THREE.MeshStandardMaterial({ color: 0x2c2a2a, roughness: 0.4, metalness: 0.8 });
+    for (const k of [-1, 1]) {
+      const skid = new THREE.Mesh(new RoundedBoxGeometry(ax ? runLen : 0.09, 0.08, ax ? 0.09 : runLen, 1, 0.025), iron);
+      skid.position.set(ax ? 0 : k * spread, 0.04, ax ? k * spread : 0);
+      body.add(skid);
+      for (const e of [-1, 1]) {
+        const tip = new THREE.Mesh(new RoundedBoxGeometry(0.09, 0.26, 0.09, 1, 0.025), iron);
+        tip.position.set(ax ? e * (runLen / 2 + 0.02) : k * spread, 0.13, ax ? k * spread : e * (runLen / 2 + 0.02));
+        tip.rotation[ax ? 'z' : 'x'] = (ax ? -e : e) * 0.6;
+        body.add(tip);
+      }
+    }
+    const arrowGeo = new THREE.ShapeGeometry(new THREE.Shape([new THREE.Vector2(0.2, 0), new THREE.Vector2(-0.08, 0.19), new THREE.Vector2(-0.08, -0.19)]));
+    arrowGeo.rotateX(-Math.PI / 2);
+    const paint = new THREE.MeshStandardMaterial({ color: 0xf6ead0, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2 });
+    for (const e of [-1, 1]) {
+      const arrow = new THREE.Mesh(arrowGeo, paint), reachOut = (ax ? w : d) / 2 - 0.2;
+      arrow.position.set(ax ? e * reachOut : 0, CRATE_H + 0.006, ax ? 0 : e * reachOut);
+      arrow.rotation.y = ax ? (e > 0 ? 0 : Math.PI) : e > 0 ? -Math.PI / 2 : Math.PI / 2;
+      body.add(arrow);
+    }
+    shadows(body);
+  }
+  // padlocked: chains crossing the lid and down the sides, a padlock on the front in the colour of the crate with its key
+  if (opts.lockColor) {
+    const lock = new THREE.Group(), chain = new THREE.MeshStandardMaterial({ color: 0x8a8c90, roughness: 0.35, metalness: 0.85 });
+    for (const [lw, ld] of [[w + 0.05, 0.11], [0.11, d + 0.05]]) {
+      const band = new THREE.Mesh(new RoundedBoxGeometry(lw, CRATE_H + 0.05, ld, 1, 0.03), chain);
+      band.position.y = CRATE_H / 2 + 0.01;
+      lock.add(band);
+    }
+    const tint = new THREE.MeshStandardMaterial({ color: SUPPLY[opts.lockColor].paint, roughness: 0.35, metalness: 0.5 });
+    const padlock = new THREE.Group();
+    const lockBody = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.22, 0.09, 2, 0.03), tint);
+    const shackle = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.022, 8, 16, Math.PI), chain);
+    shackle.position.y = 0.11;
+    // its keyhole, or (more than one padlock) its number in the keyhole's place
+    const hole = opts.mark ? new THREE.Mesh(new THREE.CircleGeometry(0.085, 20), digitMaterial(opts.mark)) : new THREE.Mesh(new THREE.CircleGeometry(0.03, 10), new THREE.MeshBasicMaterial({ color: 0x1a1414 }));
+    hole.position.set(0, opts.mark ? -0.005 : -0.02, 0.047);
+    padlock.add(lockBody, shackle, hole);
+    // sitting on the lid where the chains cross, tipped to face the camera, big enough to read from it
+    padlock.position.set(0, CRATE_H + 0.2, 0.04);
+    padlock.rotation.x = -0.45;
+    padlock.scale.setScalar(1.9);
+    lock.add(padlock);
+    lock.traverse((m) => m.isMesh && (m.castShadow = true));
+    body.add(lock);
+    out.lock = lock;
+  }
+  // the key to a padlocked crate, lying gold on the lid
+  if (opts.key) {
+    const gold = new THREE.MeshStandardMaterial({ color: 0xf2c440, roughness: 0.25, metalness: 0.9, emissive: 0x6a4a00, emissiveIntensity: 0.25 });
+    const key = new THREE.Group(), bow = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.026, 8, 18), gold);
+    bow.rotation.x = Math.PI / 2;
+    bow.position.x = -0.16;
+    const shaft = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.04, 0.04, 1, 0.012), gold);
+    shaft.position.x = 0.04;
+    key.add(bow, shaft);
+    for (const x of [0.1, 0.15]) {
+      const tooth = new THREE.Mesh(new RoundedBoxGeometry(0.035, 0.035, 0.08, 1, 0.01), gold);
+      tooth.position.set(x, 0, 0.05);
+      key.add(tooth);
+    }
+    key.scale.setScalar(1.35);
+    key.rotation.y = 0.5;
+    key.position.set(across ? Math.min(0.32, w / 2 - 0.22) : 0, CRATE_H + 0.03, across ? 0 : Math.min(0.32, d / 2 - 0.22));
+    if (Math.max(w, d) < 1.2) key.position.set(0.1, CRATE_H + 0.03, 0.1);
+    key.traverse((m) => m.isMesh && (m.castShadow = true));
+    body.add(key);
+    out.key = key;
+    // a tag with its lock's number, lying by the key's bow
+    if (opts.mark) {
+      const tag = new THREE.Mesh(new THREE.CircleGeometry(0.14, 20).rotateX(-Math.PI / 2), digitMaterial(opts.mark));
+      tag.position.set(THREE.MathUtils.clamp(key.position.x - 0.3, -w / 2 + 0.16, w / 2 - 0.16), CRATE_H + 0.045, THREE.MathUtils.clamp(key.position.z + 0.17, -d / 2 + 0.16, d / 2 - 0.16));
+      body.add(tag);
+      out.keyTag = tag;
+    }
+  }
   g.add(body);
-  return { group: g, body };
+  return out;
+}
+
+// the pond: water over its cells (a little below the tiles), lily pads, a flower, reeds along the frame
+function addPond(group, cells, ox, oz, r) {
+  const water = new THREE.MeshStandardMaterial({ color: 0x3f8fc8, roughness: 0.08, metalness: 0.15, transparent: true, opacity: 0.9 });
+  const mud = new THREE.MeshStandardMaterial({ color: 0x5a4630, roughness: 1 });
+  for (const [x, y] of cells) {
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(1, 0.06, 1), mud);
+    bed.position.set(ox + x + 0.5, -0.17, oz + y + 0.5);
+    bed.receiveShadow = true;
+    const top = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), water);
+    top.position.set(ox + x + 0.5, -0.07, oz + y + 0.5);
+    top.receiveShadow = true;
+    group.add(bed, top);
+  }
+  const pad = new THREE.MeshStandardMaterial({ color: 0x4f9a3a, roughness: 0.7, side: THREE.DoubleSide });
+  const padGeo = new THREE.CylinderGeometry(0.17, 0.17, 0.02, 18, 1, false, 0.35, Math.PI * 2 - 0.7);
+  cells.slice(0, 3).forEach(([x, y], k) => {
+    const p = new THREE.Mesh(padGeo, pad);
+    p.position.set(ox + x + 0.3 + r.next() * 0.4, -0.055, oz + y + 0.3 + r.next() * 0.4);
+    p.rotation.y = r.next() * 6.28;
+    p.scale.setScalar(0.8 + r.next() * 0.5);
+    group.add(p);
+    if (k === 0) {
+      const flower = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.08, 6), new THREE.MeshStandardMaterial({ color: 0xf6a8c8, roughness: 0.7 }));
+      flower.position.copy(p.position).add(new THREE.Vector3(0, 0.05, 0));
+      flower.rotation.x = Math.PI;
+      group.add(flower);
+    }
+  });
+  // reeds: thin green stalks with brown heads, in clumps on the pond's cells by the frame
+  const stalk = new THREE.MeshStandardMaterial({ color: 0x6a9a3a, roughness: 0.9 }), head = new THREE.MeshStandardMaterial({ color: 0x6a4428, roughness: 1 });
+  const W = Math.round(-ox * 2), H = Math.round(-oz * 2);
+  for (const [x, y] of cells) {
+    const edgeX = x === 0 ? -0.38 : x === W - 1 ? 0.38 : null, edgeY = y === 0 ? -0.38 : y === H - 1 ? 0.38 : null;
+    if (edgeX == null && edgeY == null) continue;
+    for (let k = 0; k < 3; k++) {
+      const h = 0.45 + r.next() * 0.3, reed = new THREE.Group();
+      reed.add(new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.016, h, 4), stalk));
+      const cat = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.12, 6), head);
+      cat.position.y = h / 2 - 0.05;
+      reed.add(cat);
+      reed.position.set(ox + x + 0.5 + (edgeX ?? (r.next() - 0.5) * 0.7) + (r.next() - 0.5) * 0.12, -0.07 + h / 2, oz + y + 0.5 + (edgeY ?? (r.next() - 0.5) * 0.7) + (r.next() - 0.5) * 0.12);
+      reed.rotation.set((r.next() - 0.5) * 0.2, 0, (r.next() - 0.5) * 0.2);
+      reed.traverse((m) => m.isMesh && (m.castShadow = true));
+      group.add(reed);
+    }
+  }
 }
 
 // a pennant on a short spar: its tip waves (vertices moved each frame in wave())
@@ -393,6 +572,29 @@ export function canvasTex(size, draw) {
   return t;
 }
 
+// a number on a cream disc: a padlock and its key's tag, when a level has more than one
+const digits = {};
+function digitMaterial(n) {
+  if (digits[n]) return digits[n];
+  const cv = document.createElement('canvas'), g = cv.getContext('2d');
+  cv.width = cv.height = 64;
+  g.fillStyle = '#fff6e2';
+  g.beginPath();
+  g.arc(32, 32, 30, 0, Math.PI * 2);
+  g.fill();
+  g.lineWidth = 4;
+  g.strokeStyle = '#2a2238';
+  g.stroke();
+  g.fillStyle = '#2a2238';
+  g.font = '800 44px system-ui, sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(String(n), 32, 35);
+  const map = new THREE.CanvasTexture(cv);
+  map.colorSpace = THREE.SRGBColorSpace;
+  return (digits[n] = new THREE.MeshBasicMaterial({ map, transparent: true, polygonOffset: true, polygonOffsetFactor: -2 }));
+}
+
 // a stencil in cream paint, a little worn: what the crate carries (also drawn on the how-to card's legend)
 const stencils = {};
 function stencilMaterial(icon) {
@@ -400,7 +602,7 @@ function stencilMaterial(icon) {
   const cv = stencilCanvas(icon), map = new THREE.CanvasTexture(cv);
   map.colorSpace = THREE.SRGBColorSpace;
   map.anisotropy = 4;
-  return (stencils[icon] = new THREE.MeshStandardMaterial({ map, transparent: true, depthWrite: false, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2 }));
+  return (stencils[icon] = new THREE.MeshStandardMaterial({ map, emissive: 0xffffff, emissiveMap: map, emissiveIntensity: 0, transparent: true, depthWrite: false, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2 }));
 }
 
 export function stencilCanvas(icon, worn = true) {
@@ -562,5 +764,11 @@ function crateMaterial(paint, alongX) {
     map.center.set(0.5, 0.5);
     map.rotation = Math.PI / 2;
   }
-  return (crateMats[key] = new THREE.MeshStandardMaterial({ map, roughness: 0.7 }));
+  return (crateMats[key] = new THREE.MeshStandardMaterial({ map, roughness: 0.7, emissive: 0xffffff, emissiveMap: map, emissiveIntensity: 0 }));
+}
+
+// the crates keep their colours as the light goes (benchmark 2026-11-07: at night and in the rain they lost contrast): their
+// paint and stencils glow a little, by k (0 by day)
+export function setCrateGlow(k) {
+  for (const m of [...Object.values(crateMats), ...Object.values(stencils)]) m.emissiveIntensity = k;
 }

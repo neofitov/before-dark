@@ -9,14 +9,16 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { fitted, GROUND, makeFire, flickerFire, woodMaterial, canvasTex } from './board.js';
+import { dustPuff } from './fx.js';
 import { makeCamper } from './people.js';
 import { makeWildlife } from './wildlife.js';
+import { makeExtras, extrasKeepOut, extraSpots } from './extras.js';
 import * as sfx from './sound.js';
 
 const KIND = { red: 'fire', orange: 'tent', green: 'bench', blue: 'water', purple: 'chest', yellow: 'beds' };
 // how fast the workers go (Oleg, 2026-10-24: "make the npc move and do work faster", then "even faster"; at first it was walk
 // 1.7, carry 1.35, run 3.4 and the work about 2.5 times as slow); people.js plays their clips faster to match (PACE)
-const SPEED = { walk: 3.9, carry: 3.3, run: 5.6 };
+const SPEED = { walk: 3.9, carry: 3.3, run: 5.6, stroll: 1.5 };
 const WORK = { pickup: 0.18, putdown: 0.14, stage: 0.2, finish: 0.3, swing: 0.4 };
 // where each part piles its extras (makeCamp's extra(): a crate more than its stages): a spot in its frame and what goes there
 const PILE = { fire: [-0.85, 0.55, 'log'], tent: [0, -0.35, 'box'], bench: [1.05, 0.15, 'plank'], water: [0.05, -0.62, 'bucket'], chest: [-0.55, -0.2, 'box'], beds: [0, -2.05, 'blanket'] };
@@ -57,12 +59,32 @@ function edge(pos, f, plan) {
 // where each colour's site goes: a fixed place round the board for each part of the camp, the same in every level (the camp
 // stays and grows from level to level), never in front of the board on a wide screen; out along its direction from the
 // board until all it will build clears the workers' path. `size` is the game's largest board.
-const SLOT = { landscape: { red: -90, orange: -140, green: -40, blue: 180, purple: 0, yellow: 150 }, portrait: { red: -90, orange: -135, green: -45, blue: 135, purple: 45, yellow: 90 } };
+const SLOT = { landscape: { red: -90, orange: -140, green: -40, blue: 180, purple: 0, yellow: 150 } };
+// a phone held upright (Oleg, 2026-11-07: "rearrange camp top-bottom for portrait"; the board fills the phone's width and the
+// places round it were off the screen's sides): a row behind the board (the tent, the campfire with the beds behind it, the
+// workshop) and one in front of it (the water, the stores), across the width the phone shows: [x, the row's side]
+// (each row starts past the ground in front of the gates, where the crates land and the workers wait: tools/check-camp.js)
+// (the third number: further out than that. The row behind a cell further back, room to breathe round the board and the far
+// gates' workers in view: Oleg, 2026-11-07; the workshop more, level 20's red gate on the right folds its leaf back along the
+// frame towards it; the row in front half a cell. Half a cell more each when the board grew again and the workers left the
+// gates for their own places, Oleg 2026-11-07: "increase board size more and breathing space more")
+// (the fourth: how far the worker stands in from the site's middle, along its right, towards the phone's middle: the row in
+// front is nearer the camera, so its sides are cut first)
+const ROW = { red: [0, -1, 1.5], orange: [-3.7, -1, 1.5], green: [3.9, -1, 2.4], blue: [-4.1, 1, 0.9, 0.7], purple: [3.95, 1, 0.9, -0.7], yellow: [0, 1] };
 export function campLayout(colors, size, portrait) {
   const rx = size.w / 2 + 3, rz = size.h / 2 + 2.8, sites = {};
   for (const color of colors) {
-    const a = (SLOT[portrait ? 'portrait' : 'landscape'][color] * Math.PI) / 180, dir = new THREE.Vector3(Math.cos(a) * rx, 0, Math.sin(a) * rz);
-    const f = dir.clone().negate().normalize(), kinds = color === 'red' || color === 'yellow' ? ['fire', 'beds'] : [KIND[color]];
+    const kinds = color === 'red' || color === 'yellow' ? ['fire', 'beds'] : [KIND[color]];
+    if (portrait) {
+      // straight out from the board's side until all it builds clears the path
+      const [x, side, back = 0, lean = 0] = ROW[color], f = new THREE.Vector3(0, 0, -side), at = (t) => new THREE.Vector3(x, 0, side * (size.h / 2 + t));
+      let t = 2.05 + back + Math.max(...kinds.map((k) => PLAN[k].towards[1]));
+      while (t < 6 && kinds.some((k) => edge(at(t), f, PLAN[k]).some(([px, pz]) => pathGap(px, pz, size.w, size.h) < PATH.clear))) t += 0.02;
+      sites[color] = { pos: at(t).setY(GROUND), f, r: new THREE.Vector3(-f.z, 0, f.x), kind: KIND[color], color, lean };
+      continue;
+    }
+    const a = (SLOT.landscape[color] * Math.PI) / 180, dir = new THREE.Vector3(Math.cos(a) * rx, 0, Math.sin(a) * rz);
+    const f = dir.clone().negate().normalize();
     let t = 1;
     while (t < 3 && kinds.some((k) => edge(dir.clone().multiplyScalar(t), f, PLAN[k]).some(([x, z]) => pathGap(x, z, size.w, size.h) < PATH.clear))) t += 0.02;
     const pos = dir.multiplyScalar(t).setY(GROUND);
@@ -76,21 +98,35 @@ export function campLayout(colors, size, portrait) {
   return sites;
 }
 
-// every place the camp can have, in both screen shapes: the ground the forest keeps out of. `size` is the game's largest
-// board; each has `gap(x, z)`, how far a point lies outside its rectangle
+// how deep the camp is upright, front to back: from the back of its row behind the board to the front of the extras before
+// it (main.js frames an upright phone to centre this)
+export function campDepth(size, portrait) {
+  let z0 = Infinity, z1 = -Infinity;
+  for (const s of Object.values(campLayout(Object.keys(KIND), size, portrait))) {
+    for (const k of s.color === 'red' || s.color === 'yellow' ? ['fire', 'beds'] : [s.kind]) {
+      for (const [, z] of edge(s.pos, s.f, PLAN[k])) (z0 = Math.min(z0, z)), (z1 = Math.max(z1, z));
+    }
+  }
+  for (const e of Object.values(extraSpots(size, portrait))) (z0 = Math.min(z0, e.z - e.d / 2)), (z1 = Math.max(z1, e.z + e.d / 2));
+  return [z0, z1];
+}
+
+// every place the camp can have, in both screen shapes: the ground the forest keeps out of (and the extras' places,
+// extras.js). `size` is the game's largest board; each has `gap(x, z)`, how far a point lies outside its rectangle
 export function campKeepOut(size) {
-  return [false, true].flatMap((portrait) => Object.values(campLayout(Object.keys(KIND), size, portrait)).map((s) => {
+  return [...[false, true].flatMap((portrait) => Object.values(campLayout(Object.keys(KIND), size, portrait)).map((s) => {
     const { across, towards } = PLAN[s.kind];
     const gap = (x, z) => {
       const dx = x - s.pos.x, dz = z - s.pos.z, a = dx * s.r.x + dz * s.r.z, b = dx * s.f.x + dz * s.f.z;
       return Math.hypot(Math.max(0, across[0] - a, a - across[1]), Math.max(0, towards[0] - b, b - towards[1]));
     };
     return { color: s.color, kind: s.kind, portrait, x: s.pos.x, z: s.pos.z, gap };
-  }));
+  })), ...extrasKeepOut(size)];
 }
 
 // story: what the game's levels bring ({ colors: the camp's parts so far, prior: { colour: crates brought by earlier levels },
-// total: { colour: crates in the whole game }, size: the largest board }); without it, this level alone
+// total: { colour: crates in the whole game }, size: the largest board, extras: what the stars have earned (extras.js) });
+// without it, this level alone
 export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   const added = [], pops = [], drops = [];
   const scene = { add: (...o) => (added.push(...o), world.add(...o)), remove: (...o) => world.remove(...o) };
@@ -516,10 +552,29 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     return g;
   }
 
-  // ---- the workers: one per part of the camp. A colour this level brings has its worker waiting at its gate; the others stay
-  // by their work ----
+  // ---- the workers: one per part of the camp, busy at their own place (Oleg, 2026-11-07: "make the workers be busy at their
+  // workplace instead of waiting at the gates - only when crate is dropped they come and get it. this way they will always be
+  // visible"); a crate on their gate's mat and they run round the board for it ----
   const workers = {}, lamps = [], waters = [];
-  const workSpot = (site) => site.kind === 'beds' ? site.pos.clone().addScaledVector(site.f, -1.05) : site.pos.clone().addScaledVector(site.f, site.kind === 'fire' ? 0.75 : site.kind === 'tent' ? 1.05 : 0.8).addScaledVector(site.r, site.kind === 'fire' ? 0.45 : 0);
+  // (the bed maker in front of the campfire, on the other side of it from the fire keeper, by the bed there: behind the fire
+  // she was out of sight, Oleg 2026-11-07)
+  const workSpot = (site) => site.kind === 'beds' ? site.pos.clone().addScaledVector(site.f, 0.5).addScaledVector(site.r, -1.0) : site.pos.clone().addScaledVector(site.f, site.kind === 'fire' ? 0.75 : site.kind === 'tent' ? 1.05 : 0.8).addScaledVector(site.r, site.kind === 'fire' ? 0.45 : site.lean || 0);
+  // a crew back late waits out beyond its gate, clear of the camp's places and the other workers (upright, a far gate's
+  // forest edge is the camp's row behind the board: 2026-11-07, the tent crew stood on the bed maker)
+  const homes = Object.values(sites).map((x) => workSpot(x));
+  function awayFrom(s) {
+    const clear = (p) => homes.every((h) => h.distanceTo(p) > 1.1) && Object.values(sites).every((x) => {
+      const { across, towards } = PLAN[x.kind], d = p.clone().sub(x.pos), a = d.dot(x.r), b = d.dot(x.f);
+      return Math.hypot(Math.max(0, across[0] - a, a - across[1]), Math.max(0, towards[0] - b, b - towards[1])) > 0.3;
+    }) && Object.values(extraSpots(story.size, portrait)).every((e) => Math.hypot(Math.max(0, Math.abs(p.x - e.x) - e.w / 2), Math.max(0, Math.abs(p.z - e.z) - e.d / 2)) > 0.3);
+    for (const out of [2.7, 2.2, 3.2]) {
+      for (const side of [0.6, -0.6, 1.2, -1.2, 1.8, -1.8, 2.4, -2.4, 3, -3]) {
+        const p = s.pos.clone().addScaledVector(s.out, out).addScaledVector(s.side, side).setY(GROUND);
+        if (clear(p)) return p;
+      }
+    }
+    return s.pos.clone().addScaledVector(s.out, 2.7).addScaledVector(s.side, 0.6).setY(GROUND);
+  }
   for (const [color, site] of Object.entries(sites)) {
     const s = spots[color], before = story.prior[color] || 0, all = story.total[color] || (s ? s.total : 0);
     const camper = makeCamper(style, site.kind, new THREE.Color(SUPPLY_FLAG[color]).getStyle(), models);
@@ -543,10 +598,23 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     site.prebuilt = added.slice(a0);
     if (site.fire) site.fire.size = fireSize(site.stage);
     quiet = false;
-    const home = s ? s.pos.clone().addScaledVector(s.side, 0.62).addScaledVector(s.out, 0.05).setY(GROUND) : workSpot(site).setY(GROUND);
-    const w = { color, site, camper, home, pos: home.clone(), heading: s ? Math.atan2(-s.out.x, -s.out.z) : Math.atan2(-home.x, -home.z), queue: [], job: null, path: [], phase: s ? 'wait' : 'home', t: 0, done: !s };
+    const home = workSpot(site).setY(GROUND);
+    const w = { color, site, camper, home, pos: home.clone(), heading: Math.atan2(site.pos.x - home.x, site.pos.z - home.z), queue: [], job: null, path: [], phase: s ? 'wait' : 'home', t: 0, done: !s, beat: Object.keys(workers).length * 2.3 };
     // bedtime (twist b): this crew turns in after a set move: the gate's leaf, and a tag over the worker with the moves left
-    const g = L.gates.find((x) => x.color === color && x.closeAt != null);
+    const g = L.gates.find((x) => x.color === color && x.closeAt != null), late = L.gates.find((x) => x.color === color && x.openAt != null);
+    // a crew back late (2026-10-28): out at the forest's edge beyond their gate, which stays shut until they are back; a tag on
+    // the gate counts the moves till then
+    if (late && board.doors?.[color] && s) {
+      w.door = board.doors[color];
+      w.openAt = late.openAt;
+      w.late = true;
+      w.away = awayFrom(s);
+      w.pos.copy(w.away);
+      w.awayAt = w.away.clone();
+      w.phase = 'away';
+      w.tag = sleepTag(true);
+      scene.add(w.tag);
+    }
     if (g && board.doors?.[color]) {
       w.door = board.doors[color];
       w.closeAt = g.closeAt;
@@ -609,6 +677,43 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       pts.push(new THREE.Vector3(x, GROUND, z));
     }
     pts.push(to.clone().setY(GROUND));
+    return aroundFire(from, pts);
+  }
+  // nobody walks through the campfire (Oleg, 2026-11-07: "do not let workers step on the fire"; the bed maker works behind
+  // it and the beds stand round it): a leg of a walk that passes too near it goes round it instead
+  const FIRE = 0.8;
+  function aroundFire(from, pts) {
+    const fire = sites.red?.pos;
+    if (!fire) return pts;
+    const out = [];
+    let a = from;
+    for (const b of pts) {
+      const ab = b.clone().sub(a).setY(0), len2 = ab.lengthSq();
+      const u = len2 > 1e-6 ? fire.clone().sub(a).setY(0).dot(ab) / len2 : 0;
+      const off = a.clone().addScaledVector(ab, u).sub(fire).setY(0), d = off.length();
+      if (u > 0 && u < 1 && d < FIRE) {
+        if (d < 1e-3) off.set(-ab.z, 0, ab.x);
+        off.normalize();
+        const n = ab.normalize(), r = FIRE + 0.12;
+        out.push(fire.clone().addScaledVector(off, r).addScaledVector(n, -0.7 * r).setY(GROUND), fire.clone().addScaledVector(off, r).addScaledVector(n, 0.7 * r).setY(GROUND));
+      }
+      out.push(b);
+      a = b;
+    }
+    return out;
+  }
+  // where to stand to pick up a crate on its mat: beside it, on the side the walk comes from
+  function toCrate(from, crate) {
+    const c = crate.at().clone().setY(GROUND), pts = route(from, c), [cw, ch] = crate.size?.() || [0.6, 0.6];
+    pts.pop();
+    const n = pts.length;
+    let dir = n > 1 ? pts[n - 2].clone().sub(pts[n - 1]).setY(0) : new THREE.Vector3();
+    if (dir.lengthSq() < 1e-4) dir = from.clone().sub(c).setY(0);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0, 1);
+    dir.normalize();
+    const reach = (Math.abs(dir.x) * cw + Math.abs(dir.z) * ch) / 2 + 0.3;
+    while (pts.length && pts[pts.length - 1].distanceTo(c) < reach) pts.pop();
+    pts.push(c.addScaledVector(dir, reach));
     return pts;
   }
   // a crate has landed on its gate's mat
@@ -652,7 +757,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     if (!w.path.length) return true;
     const target = w.path[0], d = target.clone().sub(w.pos);
     d.y = 0;
-    const dist = d.length(), sp = (w.phase === 'carry' ? SPEED.carry : w.phase === 'toDoor' ? SPEED.run : SPEED.walk) * dt;
+    const dist = d.length(), sp = (w.phase === 'carry' ? SPEED.carry : w.phase === 'toDoor' || w.phase === 'toCrate' ? SPEED.run : SPEED.walk) * dt;
     if (dist <= sp) {
       w.pos.copy(target);
       w.path.shift();
@@ -669,8 +774,8 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   // done (a crate that lands on the mat later gets them out of bed), then bed. Before bedtime anyone in bed gets up.
   // True while this has the worker.
   function sleepy(w, dt) {
-    const d = w.door, shut = w.bedtime, is = (...phases) => phases.includes(w.phase);
-    const back = () => walkTo(w, w.done ? workSpot(w.site) : w.home, 'backHome');
+    const d = w.door, shut = w.bedtime || w.late, is = (...phases) => phases.includes(w.phase);
+    const back = () => walkTo(w, w.home, 'backHome');
     // the gate the wrong way round, and nobody on it yet
     if ((shut ? d.k < 1 : d.k > 0) && !is('toDoor', 'closing', 'toOpen', 'opening')) {
       if (is('putdown', 'build')) return false;
@@ -702,13 +807,32 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       w.pos.lerp(d.handle(d.k), Math.min(1, dt * 10));
       if (shut ? d.k >= 1 : d.k <= 0) {
         if (shut) sfx.gateShut();
-        if (shut && !w.job && !w.queue.length) walkTo(w, w.bed.side, 'toBed');
+        if (shut && w.late) walkTo(w, w.away, 'toAway');
+        else if (shut && !w.job && !w.queue.length) walkTo(w, w.bed.side, 'toBed');
         else back();
       }
       return true;
     }
     if (shut) {
       // work left (a crate on the mat, one set down on the way): out of bed and back to it; then bed
+      // a late crew out in the forest: there, gathering, or on the way back out to it; a move before they are due, back
+      // and waiting by the shut gate, so it swings open on time
+      if (w.late) {
+        const spot = w.soon ? d.handle(1) : w.away;
+        if (!w.awayAt || w.awayAt.distanceTo(spot) > 0.01 || !is('toAway', 'away')) {
+          w.awayAt = spot.clone();
+          walkTo(w, spot, 'toAway', w.soon ? 'run' : 'walk');
+        } else if (is('toAway')) {
+          if (step(w, dt)) w.phase = 'away';
+        } else if (w.soon) {
+          w.heading = turn(w.heading, Math.atan2(d.hinge.x - w.pos.x, d.hinge.z - w.pos.z), dt * 5);
+          w.camper.play('idle');
+        } else {
+          w.heading = turn(w.heading, Math.atan2(w.away.x, w.away.z), dt * 3);
+          w.camper.play(Math.sin(w.t * 0.9) > 0.6 ? 'pickup' : 'idle');   // gathering
+        }
+        return true;
+      }
       if (w.job || w.queue.length) {
         if (is('toBed', 'asleep')) back();
         else if (is('backHome')) {
@@ -735,7 +859,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       return true;
     }
     // before bedtime, the gate open: up and back to the gate
-    if (is('toBed', 'asleep')) {
+    if (is('toBed', 'asleep', 'toAway', 'away')) {
       back();
       return true;
     }
@@ -746,21 +870,118 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     return false;
   }
 
+  // between crates, at their own place: a while at their work (turned to it), then a look over at the board; they sit as
+  // night comes, and cheer at the end
+  function busy(w, dt, dusk, state) {
+    const site = w.site;
+    w.beat += dt;
+    if (w.cheer > 0) {
+      w.cheer -= dt;
+      w.heading = turn(w.heading, Math.atan2(-w.pos.x, -w.pos.z), dt * 6);
+      return w.camper.play('cheer');
+    }
+    if (dusk > 0.9 || state === 'lost') {
+      w.heading = turn(w.heading, Math.atan2(-w.pos.x, -w.pos.z), dt * 3);
+      return w.camper.play('sit');
+    }
+    if (site.stage === 0) return chores(w, dt);
+    // (left mid-chore when the first stage went up: back to the work first)
+    if (w.pos.distanceTo(w.home) > 0.1) {
+      w.chore = null;
+      return along(w, [w.home], dt);
+    }
+    const at = w.beat % 9 < 6;
+    w.heading = turn(w.heading, at ? Math.atan2(site.pos.x - w.pos.x, site.pos.z - w.pos.z) : Math.atan2(-w.pos.x, -w.pos.z), dt * 4);
+    w.camper.play(at ? 'tinker' : 'idle');
+  }
+
+  // nothing built at their place yet (Oleg, 2026-11-07: "workers should be working when they haven't started the
+  // construction yet"): they get the ground ready, about their place: over to a spot, down to gather (a little dust), back
+  // with it to where the work will stand, down again to set it there, a look over at the board, and again
+  function chores(w, dt) {
+    const c = (w.chore ||= { step: 'look', t: 0.6 + (w.beat % 1.3), pts: [] });
+    c.t -= dt;
+    if (c.step === 'go' || c.step === 'back') {
+      if (!along(w, c.pts, dt)) return;
+      c.step = c.step === 'go' ? 'pick' : 'drop';
+      c.t = c.step === 'pick' ? 1.1 + Math.random() * 0.6 : 0.6;
+      c.puff = 0;
+      return w.camper.play('gather');
+    }
+    if (c.step === 'pick' || c.step === 'drop') {
+      w.camper.play('gather');
+      c.puff -= dt;
+      if (c.puff <= 0 && !quiet) {
+        c.puff = 0.55;
+        const hand = w.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(w.heading), 0, Math.cos(w.heading)), 0.32);
+        dustPuff(fx.dust, hand.x, hand.z, 0.25, 0.25, 0.12);
+      }
+      if (c.t > 0) return;
+      if (c.step === 'pick') {
+        c.step = 'back';
+        c.pts = aroundFire(w.pos, [heap(w)]);
+      } else {
+        c.step = 'look';
+        c.t = 1 + Math.random() * 1.2;
+      }
+      return;
+    }
+    // a look over at the board, then off to the next spot
+    w.heading = turn(w.heading, Math.atan2(-w.pos.x, -w.pos.z), dt * 4);
+    w.camper.play('idle');
+    if (c.t > 0) return;
+    c.step = 'go';
+    c.pts = aroundFire(w.pos, [choreSpot(w)]);
+  }
+  // where what they gather goes: the middle of where the work will stand (the bed maker's, where the first bed goes)
+  const heap = (w) => (w.site.kind === 'beds' ? beds[0].pos : w.site.pos).clone().addScaledVector(w.site.f, 0.45).setY(GROUND);
+  // a spot about their place: on its ground, near their own place, clear of a lit fire and of the other workers. Upright, in
+  // front of it rather than behind (towards the board, short of the path; behind, they went up under the top bar) and no
+  // further out to the side than they live
+  function choreSpot(w) {
+    const { across, towards } = PLAN[w.site.kind], site = w.site, fire = sites.red?.stage ? sites.red.pos : null;
+    const hv = w.home.clone().sub(site.pos).dot(site.f), size = story.size;
+    for (let k = 0; k < 20; k++) {
+      const a = Math.random() * Math.PI * 2, r = 0.6 + Math.random() * 0.9;
+      const p = w.home.clone().add(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r)), d = p.clone().sub(site.pos);
+      const u = d.dot(site.r), v = d.dot(site.f);
+      if (u < across[0] + 0.2 || u > across[1] - 0.2 || v < towards[0] + 0.2) continue;
+      if (portrait ? v < hv - 0.5 || v > towards[1] + 0.8 || pathGap(p.x, p.z, size.w, size.h) < 0.7 || Math.abs(p.x) > Math.max(3.4, Math.abs(w.home.x)) + 0.2 : v > towards[1] - 0.1) continue;
+      if (fire && p.distanceTo(fire) < FIRE + 0.3) continue;
+      if (Object.values(workers).some((o) => o !== w && o.home.distanceTo(p) < 0.7)) continue;
+      return p;
+    }
+    return w.home.clone();
+  }
+  // a short walk at an easy pace (round a lit fire); true on arrival
+  function along(w, pts, dt) {
+    while (pts.length) {
+      const d = pts[0].clone().sub(w.pos).setY(0), dist = d.length(), sp = SPEED.stroll * dt;
+      if (dist > 1e-3) w.heading = turn(w.heading, Math.atan2(d.x, d.z), dt * 10);
+      if (dist > sp) {
+        w.pos.addScaledVector(d, sp / dist);
+        w.camper.play('stroll');
+        return false;
+      }
+      w.pos.copy(pts.shift()).setY(GROUND);
+    }
+    return true;
+  }
+
   function updateWorker(w, dt, t, dusk, state) {
-    const s = spots[w.color], site = w.site;
+    const site = w.site;
     w.t += dt;
+    if (w.phase !== 'wait' && w.phase !== 'home') w.chore = null;
     if (w.door && sleepy(w, dt)) {
       // turning in (or getting up again): sleepy() moved it
     } else if (w.phase === 'wait') {
-      // on the mat, facing the gate; off to the crate as soon as one lands
-      w.heading = turn(w.heading, Math.atan2(-s.out.x, -s.out.z), dt * 5);
+      // busy at their own place; off round the board at a run as soon as a crate lands on their mat
       if (w.queue.length) {
         w.job = w.queue.shift();
-        const c = w.job.crate.at(), dir = w.pos.clone().sub(c).setY(0).normalize();
-        w.path = [c.clone().addScaledVector(dir, 0.34).setY(GROUND)];
+        w.path = toCrate(w.pos, w.job.crate);
         w.phase = 'toCrate';
-        w.camper.play('walk');
-      } else w.camper.play(dusk > 0.9 || state === 'lost' ? 'sit' : 'idle');
+        w.camper.play('run');
+      } else busy(w, dt, dusk, state);
     } else if (w.phase === 'toCrate') {
       if (step(w, dt)) {
         w.phase = 'pickup';
@@ -817,18 +1038,11 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
             const a = Math.random() * Math.PI * 2, sp = 0.5 + Math.random() * 1.4;
             fx.glow.spawn({ x: site.pos.x, y: GROUND + 0.6, z: site.pos.z, vx: Math.cos(a) * sp, vy: 1 + Math.random() * 2, vz: Math.sin(a) * sp, life: 1.1, size: 0.14, color: 0xffd36a, alpha: 0.95, gravity: 1, drag: 1.2 });
           }
-        } else walkTo(w, w.home, 'return');
+        } else w.phase = 'wait';   // and back to their work, where they stand
       }
     } else if (w.phase === 'return') {
       if (step(w, dt)) w.phase = 'wait';
-    } else if (w.phase === 'home') {
-      // done: stays by the work, watching the board; sits as night comes
-      w.heading = turn(w.heading, Math.atan2(-w.pos.x, -w.pos.z), dt * 3);
-      if (w.cheer > 0) {
-        w.cheer -= dt;
-        w.camper.play('cheer');
-      } else w.camper.play(dusk > 0.9 || state === 'lost' ? 'sit' : 'idle');
-    }
+    } else if (w.phase === 'home') busy(w, dt, dusk, state);   // all this level brings them built
     const lying = w.bed && w.phase === 'asleep', up = w.bed && made(w.bed) ? 0.34 : 0.06;
     if (w.bed) {
       w.blanket.visible = lying;
@@ -859,6 +1073,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     return (s) => {
       const [a0, b0, item] = PILE[kind] || [0, -0.9, 'box'];
       s.pile = (s.pile || []).filter((o) => o.parent);
+      if (s.pile.length >= 6) return [];   // a pile of six at most (twenty levels bring far more crates than stages)
       const k = s.pile.length, a = a0 + (k % 2 ? 0.1 : -0.1), b = b0 + (k % 4 < 2 ? -0.06 : 0.06);
       // on top of whatever stands at that spot already
       const at = s.pos.clone().addScaledVector(s.r, a).addScaledVector(s.f, b), box = new THREE.Box3();
@@ -884,18 +1099,26 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
 
   // the deer, foxes and birds round the glade (wildlife.js)
   const wildlife = makeWildlife(scene, models, story.size, campKeepOut(story.size), () => Object.values(workers).map((w) => w.pos));
+  // (signs: where the far side's gate banners stand, board.js: the bunting passes behind them)
+  const signs = L.gates.filter((g) => g.side === 'top').map((g) => [board.ox + g.at, board.ox + g.at + g.len]);
+  const extras = makeExtras(scene, models, { ox: board.ox, oz: board.oz, w: board.W, h: board.H, signs }, story.size, portrait, story.extras || [], fx);
 
-  function update(dt, t, dusk, state, moves = 0) {
+  function update(dt, t, dusk, state, moves = 0, onBoard = null) {
     for (const w of Object.values(workers)) {
       if (!w.door) continue;
       w.bedtime = moves >= w.closeAt;
-      // the tag: the moves left before this crew turns in (red on the last one)
+      w.late = w.openAt != null && moves < w.openAt;
+      w.soon = w.late && moves >= w.openAt - 1;
+      // the tag: the moves left before this crew turns in (red on the last one), or till a late crew is back
       // on the gate itself, big (playtest 2026-10-24: the number over a small worker off the board was missed)
       const sp = spots[w.color];
-      w.tag.visible = !w.bedtime && state === 'play';
-      if (sp) w.tag.position.copy(sp.gateMid).addScaledVector(sp.out, 0.55).setY(GROUND + 1.55);
+      // (none once the crew's crates are all out: playtest 2026-10-29, a "1" left on a gate looked like a job still to do)
+      w.tag.visible = (w.openAt != null ? w.late : !w.bedtime) && state === 'play' && (!onBoard || onBoard.has(w.color));
+      // (a gate on the far side: up over its banner, board.js, so the number never covers the gate's sign)
+      const far = sp && sp.out.z < -0.5;
+      if (sp) w.tag.position.copy(sp.gateMid).addScaledVector(sp.out, far ? 1.0 : 0.55).setY(GROUND + (far ? 2.3 : 1.55));
       else w.tag.position.set(w.pos.x, GROUND + 1.35, w.pos.z);
-      w.tag.userData.set(w.closeAt - moves);
+      w.tag.userData.set(w.openAt != null ? w.openAt - moves : w.closeAt - moves);
     }
     for (const p of pops) {
       p.t += dt;
@@ -927,16 +1150,17 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       wtr.position.y += (want - wtr.position.y) * Math.min(1, dt * 2);
     }
     wildlife.update(dt, t, dusk);
+    extras.update(dt, t, dusk);
   }
 
   return {
-    sites, arrived, cancel, update,
+    sites, arrived, cancel, update, extras,
     // for checks: each worker's phase, job and bedtime
     workers: () => Object.fromEntries(Object.entries(workers).map(([c, w]) => [c, { phase: w.phase, done: w.done, job: !!w.job, queue: w.queue.length, bedtime: w.bedtime, door: w.door && +w.door.k.toFixed(2), got: w.site.got, total: w.site.total, pos: [+w.pos.x.toFixed(2), +w.pos.z.toFixed(2)], path: w.path.length, to: w.path.length ? [+w.path[w.path.length - 1].x.toFixed(2), +w.path[w.path.length - 1].z.toFixed(2)] : null }])),
     busy: () => Object.values(workers).some((w) => !w.done || w.queue.length),
     cheer: () => Object.values(workers).forEach((w) => (w.cheer = 2.4)),
     fireSize: () => Object.values(sites).find((s) => s.fire)?.fire.size || 0,
-    extent: () => Object.values(sites).flatMap((s) => [s.pos.clone().addScaledVector(s.r, 1.2).addScaledVector(s.f, -0.9), s.pos.clone().addScaledVector(s.r, -1.2).addScaledVector(s.f, -0.9), s.pos.clone().addScaledVector(s.f, 1.2)]),
+    extent: () => [...Object.values(sites).flatMap((s) => [s.pos.clone().addScaledVector(s.r, 1.2).addScaledVector(s.f, -0.9), s.pos.clone().addScaledVector(s.r, -1.2).addScaledVector(s.f, -0.9), s.pos.clone().addScaledVector(s.f, 1.2)]), ...extras.extent()],
     dispose: () => world.remove(...added),
     // for checks: how far what stands at each site reaches, in its frame (across its right, towards the board), against its
     // PLAN (tools/check-camp.js)
@@ -962,7 +1186,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     loop: () => Array.from({ length: Math.ceil(per / 0.2) }, (_, k) => loopAt(k * 0.2)),
     // for checks: the ground plan of every visible part built at each site: per mesh, the corners of its box, turned and
     // placed as it stands ({ color, kind, pts: [[x, z] x 8] })
-    boxes: () => Object.entries(sites).flatMap(([color, site]) => {
+    boxes: () => [...extras.boxes(), ...Object.entries(sites).flatMap(([color, site]) => {
       const out = [], v = new THREE.Vector3();
       for (const o of [...(site.prebuilt || []), ...(site.history || []).flatMap((h) => h.pieces)]) {
         if (!o.parent || !o.visible) continue;
@@ -978,15 +1202,16 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
         });
       }
       return out;
-    }),
+    })],
   };
 }
 
 // the fire grows with its stages (lit at the third), a little more with each extra load
 const fireSize = (stage) => [0, 0, 0, 0.35, 0.5, 0.75, 1][Math.min(stage, 6)] + Math.max(0, stage - 6) * 0.05;
 
-// the tag over a crew that turns in early: the moves left, with a sleepy z
-function sleepTag() {
+// the tag over a crew that turns in early: the moves left, with a sleepy z; or (late) the moves till a crew is back, green,
+// with an arrow coming home
+function sleepTag(late = false) {
   const cv = document.createElement('canvas');
   cv.width = cv.height = 128;
   const tex = new THREE.CanvasTexture(cv), sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
@@ -998,21 +1223,21 @@ function sleepTag() {
     shown = n;
     const g = cv.getContext('2d');
     g.clearRect(0, 0, 128, 128);
-    g.fillStyle = n <= 1 ? '#d8452e' : '#fff6e2';
+    g.fillStyle = late ? '#e2f6d2' : n <= 1 ? '#d8452e' : '#fff6e2';
     g.beginPath();
     g.arc(60, 68, 50, 0, Math.PI * 2);
     g.fill();
     g.lineWidth = 6;
     g.strokeStyle = '#3a2c4a';
     g.stroke();
-    g.fillStyle = n <= 1 ? '#fff' : '#2a2238';
+    g.fillStyle = !late && n <= 1 ? '#fff' : '#2a2238';
     g.font = 'bold 64px system-ui, sans-serif';
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     g.fillText(String(n), 60, 72);
-    g.fillStyle = '#5a7ad8';
+    g.fillStyle = late ? '#3e9e38' : '#5a7ad8';
     g.font = 'bold 34px system-ui, sans-serif';
-    g.fillText('z', 108, 22);
+    g.fillText(late ? '↩' : 'z', 108, 22);
     tex.needsUpdate = true;
   };
   return sprite;

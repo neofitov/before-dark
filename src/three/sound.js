@@ -1,11 +1,15 @@
 // Sounds of the 3D board: Kenney's CC0 wood and camp sounds (mp3, which iPhones play) through Web Audio, each play a little
 // off in pitch and volume so no two moves sound alike; and an evening made in code: birds while it is light, crickets as it
-// darkens, the fire's crackle growing with the fire, rain's hiss and the wind's gusts; and the camp's music (music.js), which
-// the game's moments join in key: a note for each crate home, rising; a tune for the win. Each trade sounds like its work
+// darkens, the fire's crackle growing with the fire and the wind's gusts; and the camp's music (a recording,
+// assets/music, played by music.js makeTrack), which the game's moments join in key: a note for each crate home, rising; a tune for the win. Each trade sounds like its work
 // (stones for the fire, a mallet and canvas for the tent, a hammer on planks, a splash, coins and a ledger, blankets).
 // Nothing plays before the first touch (browsers' autoplay rule) and nothing here ever throws. No creaks or door sounds
 // (Oleg hates them) and no sliding scrape.
-import { makeMusic } from './music.js';
+import { makeMusic, makeTrack } from './music.js';
+
+// the music: a recording (music.js makeTrack); the game's moments (a crate home, the win, the stars) are played on the piano
+// made in code, in the recording's key (D major), in tune (the first strings were up to 15 cents flat: 2026-11-07)
+const TRACK = 'assets/music/camp-piano.mp3', STING = { voice: 'piano', room: 'smooth' };
 
 const FILES = {
   pick: ['pick1', 'pick2', 'pick3'], drop: ['drop1', 'drop2', 'drop3'], heavy: ['heavy1'], bump: ['bump1', 'bump2'],
@@ -16,19 +20,48 @@ const FILES = {
 const buf = {};
 // a sound's file, found from this module (so tools' pages load them too)
 const file = (n) => new URL(`../../assets/sfx3d/${n}.mp3`, import.meta.url);
-let ac = null, out = null, weather = null, amb = null, music = null, muted = false, dusk = 0, musicDusk = -1, fire = 0.3, nextBird = 0, nextCricket = 0, nextCrackle = 0;
+// Sound and music are switched apart (settings, playtest 2026-10-28: published games all have the two toggles). `out` carries
+// the sounds (with the evening's ambience `amb` in it), `mg` the music, both into `master`. The game's tunes (a crate home,
+// the win) are sounds: they play through their own strings (`sting`) on `out`, in the music's key.
+let ac = null, master = null, out = null, mg = null, weather = null, amb = null, music = null, sting = null, muted = false, musicOff = false;
+let dusk = 0, musicDusk = -1, fire = 0.3, nextBird = 0, nextCricket = 0, nextCrackle = 0;
+// ?playtest keeps the switches in its own tab, as main.js keeps the progress
+const keep = (() => {
+  try {
+    return /[?&]playtest\b/.test(location.search) ? sessionStorage : localStorage;
+  } catch {
+    return null;
+  }
+})();
 try {
-  muted = localStorage.getItem('bd.muted') === '1';
+  const old = keep.getItem('bd.muted') === '1';
+  muted = (keep.getItem('bd.sound') ?? (old ? '0' : '1')) === '0';
+  musicOff = (keep.getItem('bd.music') ?? (old ? '0' : '1')) === '0';
 } catch {}
 
 export const isMuted = () => muted;
+export const soundOn = () => !muted;
+export const musicOn = () => !musicOff;
 
-export function toggleMute() {
-  muted = !muted;
+export function setSound(on) {
+  muted = !on;
   try {
-    localStorage.setItem('bd.muted', muted ? '1' : '0');
+    keep.setItem('bd.sound', on ? '1' : '0');
   } catch {}
-  if (out) out.gain.setTargetAtTime(muted ? 0 : 1, ac.currentTime, 0.05);
+  if (out) out.gain.setTargetAtTime(on ? 1 : 0, ac.currentTime, 0.05);
+}
+export function setMusic(on) {
+  musicOff = !on;
+  try {
+    keep.setItem('bd.music', on ? '1' : '0');
+  } catch {}
+  if (mg) mg.gain.setTargetAtTime(on ? 0.34 : 0, ac.currentTime, 0.2);
+}
+// the old single switch: both off, or both on
+export function toggleMute() {
+  const on = muted && musicOff;
+  setSound(on);
+  setMusic(on);
 }
 
 // ?playtest (simulated players, checks) never makes a sound: those tabs run on Oleg's PC
@@ -43,9 +76,11 @@ export function wake() {
       return;
     }
     ac = new (window.AudioContext || window.webkitAudioContext)();
+    master = ac.createGain();
+    master.connect(ac.destination);
     out = ac.createGain();
     out.gain.value = muted ? 0 : 1;
-    out.connect(ac.destination);
+    out.connect(master);
     amb = ac.createGain();
     amb.gain.value = 0.5;
     amb.connect(out);
@@ -55,14 +90,27 @@ export function wake() {
       }
     }
     weather = makeWeatherLoops();
-    const mg = ac.createGain();
-    mg.gain.value = 0.34;
-    mg.connect(out);
-    music = makeMusic(ac, mg);
+    mg = ac.createGain();
+    mg.gain.value = musicOff ? 0 : 0.34;
+    mg.connect(master);
+    music = makeTrack(ac, mg, TRACK);
+    const sg = ac.createGain();
+    sg.gain.value = 0.34;
+    sg.connect(out);
+    sting = makeMusic(ac, sg, STING);
   } catch {
     ac = null;
   }
 }
+
+// the page hidden (another app in front, the phone locked) stops everything; back in front, it goes on (2026-11-07, Oleg: the
+// music played on on Android with the browser minimised or the phone locked)
+document.addEventListener('visibilitychange', () => {
+  if (!ac) return;
+  if (document.hidden) ac.suspend().catch(() => {});
+  else ac.resume().catch(() => {});
+});
+addEventListener('pagehide', () => ac && ac.suspend().catch(() => {}));
 
 // one of the named sound's variants; vol 0..1, rate around 1, both jittered
 export function play(name, vol = 0.6, rate = 1, delay = 0) {
@@ -108,7 +156,8 @@ function noiseBuffer(seconds) {
   return b;
 }
 
-// two looped noises: rain (a soft hiss) and wind (a low rush), both silent until the weather turns them up
+// a looped noise for the wind (a low rush), silent until the weather turns it up. No rain sound: filtered noise was a hiss,
+// not rain (Oleg, 2026-11-07: "remove the rain sound - its like hissing noise not real rain"); rain is seen, not heard
 function makeWeatherLoops() {
   const loop = (type, freq, q) => {
     const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
@@ -122,13 +171,12 @@ function makeWeatherLoops() {
     s.start(0, Math.random() * 2);
     return { f, g };
   };
-  return { rain: loop('bandpass', 2600, 0.5), wind: loop('lowpass', 420, 0.7) };
+  return { wind: loop('lowpass', 420, 0.7) };
 }
 
-// rain 0..1, wind 0..1
+// wind 0..1 (rain: no sound)
 export function setWeather(rain, windK) {
   if (!weather) return;
-  weather.rain.g.gain.setTargetAtTime(rain * 0.35, ac.currentTime, 0.3);
   weather.wind.g.gain.setTargetAtTime(Math.min(windK, 1) * 0.5, ac.currentTime, 0.4);
   weather.wind.f.frequency.setTargetAtTime(300 + windK * 500, ac.currentTime, 0.4);
 }
@@ -145,12 +193,14 @@ export function setEvening(t, f) {
 }
 
 export function tick() {
-  if (!ac || muted || ac.state !== 'running') return;
+  if (!ac || ac.state !== 'running') return;
   const now = ac.currentTime;
+  // (the recording keeps its place while the music is off, silent on its muted bus, so it comes back where it would be)
   if (music) {
     music.schedule(now + 0.8);
     if (Math.abs(dusk - musicDusk) > 0.03) music.setDusk((musicDusk = dusk));
   }
+  if (muted) return;
   if (now > nextBird) {
     nextBird = now + 1.2 + Math.random() * 3 + dusk * 6;
     if (Math.random() > dusk * 1.1) bird(now);
@@ -283,27 +333,27 @@ export function build(kind) {
 
 // a crate home on its gate's mat: a string of the music's chord, higher with each crate of the level
 export function home(n) {
-  if (!ac || muted || !music) return;
+  if (!ac || muted || !sting) return;
   try {
     const c = music.chordNow(), top = c.slice(2), up = [...top, ...top.map((m) => m + 12), ...top.map((m) => m + 24)];
-    music.phrase([up[Math.min(n, up.length - 1)]], ac.currentTime + 0.02, 0, 0.5);
+    sting.phrase([up[Math.min(n, up.length - 1)]], ac.currentTime + 0.02, 0, 0.5);
   } catch {}
 }
 
 // the game's ends and the camp's moments, in the music's key (D major)
 export function jingle(kind, delay = 0) {
-  if (!ac || muted || !music) return;
+  if (!ac || muted || !sting) return;
   try {
     const t = ac.currentTime + 0.03 + delay;
     if (kind === 'win') {
-      music.phrase([62, 66, 69, 74, 78, 81], t, 0.12, 0.55);
-      music.whistle(86, t + 0.8, 0.9, 0.05);
+      sting.phrase([62, 66, 69, 74, 78, 81], t, 0.12, 0.55);
+      sting.whistle(86, t + 0.8, 0.9, 0.05);
       play('glass', 0.25, 1.4, 0.75 + delay);
     } else if (kind === 'done') {
-      music.phrase([69, 74, 78, 81], t, 0.1, 0.45);
+      sting.phrase([69, 74, 78, 81], t, 0.1, 0.45);
       play('glass', 0.18, 1.6, 0.35 + delay);
-    } else if (kind === 'lose') music.phrase([69, 65, 62, 57], t, 0.22, 0.45);
-    else if (kind === 'start') music.phrase([50, 54, 57, 62, 66], t, 0.05, 0.35);
+    } else if (kind === 'lose') sting.phrase([69, 65, 62, 57], t, 0.22, 0.45);
+    else if (kind === 'start') sting.phrase([50, 54, 57, 62, 66], t, 0.05, 0.35);
   } catch {}
 }
 
@@ -337,7 +387,7 @@ export function gateShut() {
 // for previews (tools/sound-preview.html): run the sounds on another audio context (an OfflineAudioContext) and its loaded
 // buffers, then back
 export async function borrow(ctx, files = true) {
-  const keep = { ac, out, amb, music, muted };
+  const keep = { ac, out, amb, music, sting, muted };
   ac = ctx;
   out = ctx.createGain();
   out.connect(ctx.destination);
@@ -348,14 +398,25 @@ export async function borrow(ctx, files = true) {
   const mg = ctx.createGain();
   mg.gain.value = 0.34;
   mg.connect(out);
-  music = makeMusic(ctx, mg);
+  music = files ? makeTrack(ctx, mg, TRACK) : makeMusic(ctx, mg);
+  sting = makeMusic(ctx, mg, STING);
   if (files) {
     await Promise.all(Object.values(FILES).flat().map((n) => fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b)).then((d) => (buf[n] = d)).catch(() => {})));
+    await music.ready;
   }
   return {
     music,
     back() {
-      ({ ac, out, amb, music, muted } = keep);
+      ({ ac, out, amb, music, sting, muted } = keep);
     },
   };
+}
+
+// a star landing on the end card (k: 0, 1, 2): a bright string, higher for each
+export function star(k) {
+  if (!ac || muted || !sting) return;
+  try {
+    sting.phrase([[74, 78, 81][k] || 86], ac.currentTime + 0.02, 0, 0.55);
+    play('glass', 0.16, 1.3 + k * 0.15);
+  } catch {}
 }

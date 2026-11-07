@@ -15,11 +15,16 @@ export function makeWildlife(scene, models, size, keepOut, people) {
   // a point on an ellipse round the glade, `out` beyond the forest's inner edge
   const ring = (a, out) => new THREE.Vector3(Math.cos(a) * (hx * 1.25 + out), GROUND, Math.sin(a) * (hz + out * 0.9));
   const free = (p, margin) => keepOut.every((c) => c.gap(p.x, p.z) > margin);
+  // the nearest angle to `at` on the ring where an animal can start, off everybody's ground
+  const start = (at, out) => {
+    for (let d = 0; d < 2.5; d += 0.05) for (const a of [at + d, at - d]) if (free(ring(a, out), 0.9)) return a;
+    return at;
+  };
   const animals = [
-    grazer(scene, models, 'deer', ring, free, { at: -0.75, out: 3.2, height: 1.05 }),
-    grazer(scene, models, 'deer', ring, free, { at: -2.0, out: 2.8, height: 0.95 }),
-    trotter(scene, models, ring, free, { at: Math.PI - 0.55, out: 2.3 }),
-    trotter(scene, models, ring, free, { at: 0.35, out: 2.5 }),
+    grazer(scene, models, 'deer', ring, free, { at: start(-0.75, 3.2), out: 3.2, height: 1.05 }),
+    grazer(scene, models, 'deer', ring, free, { at: start(-2.0, 2.8), out: 2.8, height: 0.95 }),
+    trotter(scene, models, ring, free, { at: start(Math.PI - 0.55, 2.3), out: 2.3 }),
+    trotter(scene, models, ring, free, { at: start(0.35, 2.5), out: 2.5 }),
     ...[0, 1, 2].map((k) => groundBird(scene, size, free, people, k)),
     flock(scene, size),
   ].filter(Boolean);
@@ -31,7 +36,7 @@ export function makeWildlife(scene, models, size, keepOut, people) {
 }
 
 // a skinned model from the loaded ones, cloned, scaled to `height` (or `length`), casting shadows, with its clips by name
-function animal(models, name, { height, length }) {
+export function animal(models, name, { height, length }) {
   const src = models.raw(name);
   if (!src) return null;
   const model = cloneSkinned(src.scene), root = new THREE.Group();
@@ -217,9 +222,10 @@ function groundBird(scene, size, free, people, k) {
   b.root.name = 'bird';
   // never on the board or its frame and the gates' paths (playtest 2026-10-24: birds landed on the board)
   const off = (p) => Math.abs(p.x) > size.w / 2 + 1.5 || Math.abs(p.z) > size.h / 2 + 1.5;
-  const spot = () => {
+  const spot = (near) => {
+    const a0 = near && Math.atan2(near.z / (size.h / 2 + 2), near.x / (size.w / 2 + 2));
     for (let n = 0; n < 60; n++) {
-      const a = Math.random() * Math.PI * 2, d = 1.6 + Math.random() * 2.2;
+      const a = near ? a0 + (Math.random() - 0.5) * 1.1 : Math.random() * Math.PI * 2, d = 1.6 + Math.random() * 2.2;
       const p = new THREE.Vector3(Math.cos(a) * (size.w / 2 + d), GROUND, Math.sin(a) * (size.h / 2 + d));
       if (free(p, 0.4) && off(p) && Math.abs(p.x) < size.w / 2 + 4.5) return p;
     }
@@ -255,7 +261,7 @@ function groundBird(scene, size, free, people, k) {
       }
       // on the ground: off to roost at night, away from anyone coming close
       if (dusk > 0.8) return takeOff(b.root.position.clone().setY(0).normalize().multiplyScalar(18).setY(GROUND + 5));
-      if (people().some((q) => q.distanceTo(b.root.position) < 1.3)) return takeOff(spot());
+      if (people().some((q) => q.distanceTo(b.root.position) < 1.3)) return takeOff(spot(b.root.position));
       timer -= dt;
       hop = Math.max(0, hop - dt);
       b.root.position.y = GROUND + Math.sin((hop / 0.25) * Math.PI) * 0.08;
@@ -266,7 +272,7 @@ function groundBird(scene, size, free, people, k) {
           heading += (Math.random() - 0.5) * 2;
           const step = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading)).multiplyScalar(0.18).add(b.root.position);
           if (free(step, 0.4) && off(step)) (b.root.position.x = step.x), (b.root.position.z = step.z), (hop = 0.25);
-        } else if (r < 0.8) takeOff(spot());
+        } else if (r < 0.8) takeOff(spot(b.root.position));
         else heading += (Math.random() - 0.5) * 1.5;
         timer = 0.4 + Math.random() * 1.2;
       }

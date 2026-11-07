@@ -9,19 +9,24 @@ const KEYS = [   // t, sky top, horizon, sun colour, sun strength, sun height (d
   [0, '#77b8ea', '#f6e3b8', '#fff0d2', 2.6, 50, '#cfe6ff', '#6a5a3a', 1.15, 1.0],
   [0.5, '#6a6fb5', '#f6a865', '#ffc488', 2.6, 34, '#ffe0c0', '#6a4e38', 1.15, 1.05],
   [0.78, '#3d4290', '#e07a55', '#ff9a5c', 2.3, 22, '#d8b8e8', '#4a3440', 1.15, 1.15],
-  [0.92, '#1c2258', '#7a4a6a', '#c890b0', 1.2, 26, '#8a96e0', '#262634', 0.95, 1.2],
+  [0.92, '#1c2258', '#7a4a6a', '#c890b0', 1.2, 26, '#8a96e0', '#262634', 1.05, 1.2],
   [1, '#0a0f2c', '#202a58', '#a8bcff', 0.9, 40, '#7080d0', '#181826', 0.8, 1.2],
 ];
 
 // the wind every swaying material shares: time, strength (0 calm .. 1 storm) and direction
 export const wind = { t: { value: 0 }, k: { value: 0.35 }, dir: { value: new THREE.Vector2(0.8, 0.35).normalize() } };
 
+// a phone or a tablet (a touch screen first), or ?low to try it on a computer (Oleg, 2026-11-07: "game is a bit laggy on the
+// phones is there a cheap way to increase performance"; measured on a full camp: the sun's shadows were two thirds of a
+// frame, 640 of 1325 draws): drawn at 1.5 pixels per point, not 2-3, and lighter shadows (a smaller map, the plain soft
+// edge; main.js redraws them every other frame and steps down to 1 pixel per point when a phone still falls behind)
+export const LOW = /[?&]low\b/.test(location.search) || (matchMedia('(pointer: coarse)').matches && !/[?&]high\b/.test(location.search));
 export function makeWorld(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: /[?&]film\b/.test(location.search) });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW ? 1.5 : 2));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = LOW ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 200);
   scene.fog = new THREE.Fog(0xf6e3b8, 22, 55);
@@ -46,7 +51,7 @@ export function makeWorld(canvas) {
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff0d2, 2.6);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(LOW ? 1024 : 2048, LOW ? 1024 : 2048);
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
   sun.shadow.radius = 3;

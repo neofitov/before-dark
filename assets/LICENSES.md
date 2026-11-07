@@ -1,7 +1,7 @@
 # Asset licences
 
-Every asset is CC0 1.0 (public domain), copied or converted from the local packs in `C:\Source\Personal\tools\assets-cc0`.
-The one library, three.js, is MIT (see the end).
+Every asset is CC0 1.0 (public domain), copied or converted from the local packs in `C:\Source\Personal\tools\assets-cc0`,
+except the music (see Music). The one library, three.js, is MIT (see the end).
 
 | Pack | By | Licence | Files used |
 |---|---|---|---|
@@ -14,6 +14,17 @@ The one library, three.js, is MIT (see the end).
 | Mini Characters 1.0 | Kenney | CC0 1.0 | models/people/character-male-a, male-b, male-e, female-b, female-c, female-f, Textures/colormap.png (downloaded 2026-10-24 with Oleg's yes; the 'Kenney' campers) |
 | RPG Audio | Kenney | CC0 1.0 | sfx/ (2D): exit, win, fail, pick, clear, grow; sfx3d/cloth1 (cloth2), coins1 (handleCoins), latch1 (metalLatch), chop1 (chop), leather1 (dropLeather), pot1 (metalPot1), cloth2-4 (cloth1, cloth3, cloth4), coins2 (handleCoins2), book1-2 (bookPlace1-2), click1 (metalClick), as mp3. No creak or door sounds (Oleg). |
 | Impact Sounds | Kenney | CC0 1.0 | sfx/ (2D): slide, place; sfx3d/pick1-3 (impactWood_light_000, 002, 004), drop1-3 (impactWood_medium_000, 002, 004), heavy1 (impactWood_heavy_001), bump1-2 (impactPlank_medium_000, 003), stone1-3 (impactMining_000, 001, 003), thud1-3 (impactWood_heavy_000, 002, 003), tap1-3 (impactMetal_light_000, 002, 004), plank1-2 (impactPlank_medium_001, 002), soft1-2 (impactSoft_medium_000, 002), glass1 (impactGlass_light_001), as mp3 |
+
+## Music
+
+`music/camp-piano.mp3`: "Before Dark camp piano", made 2026-11-07 for this game with the ACE-Step v1.5 XL model on ACE Music
+(acemusic.ai, TimeDomain Inc.), free plan, from the description "calm solo piano, soft felt piano, gentle flowing arpeggios,
+warm and cozy, peaceful, ambient piano, minimal and unobtrusive, campfire at sunset in a forest camp, puzzle game background
+music, no drums, no vocals, instrumental" (D major, 6/8, 180 s); Oleg's pick of two. ACE Music Terms of Service (version
+2026-11-01), section 4.2: outputs of ACE-Step v1.5, XL included, may be used for personal and commercial purposes with no
+fee, attribution appreciated but not required, and not conditional on a paid plan (https://acemusic.ai/terms/). The model
+itself is MIT (github.com/ACE-Step/ACE-Step-1.5). Made with AI, and said so in the README and the store texts. Turned to
+-20 LUFS at 128 kbps, cover art and tags removed.
 
 Made in code: my own campers (src/three/people.js), every camp building (stones, logs, tent poles and canvas, sawhorses,
 bench, tools, tool wall, trough, lanterns, coins...), the crates, tiles, frame, flags, mats, stencils, flames, particles,

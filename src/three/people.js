@@ -225,7 +225,7 @@ function ownCamper(c, color) {
   return {
     root,
     play(s) {
-      state = s === 'run' ? 'walk' : s;
+      state = s === 'run' || s === 'stroll' ? 'walk' : s === 'tinker' ? 'work' : s === 'gather' ? 'pickup' : s;
     },
     update: pose,
     hand: (out) => out.set(0, 1.12, 0.36).applyMatrix4(root.matrixWorld),
@@ -247,10 +247,12 @@ function kenneyCamper(c, color, models, who) {
   const legsOnly = clips.walk && new THREE.AnimationClip('carry-walk', clips.walk.duration, clips.walk.tracks.filter((tr) => !/arm/.test(tr.name)));
   const actions = {};
   const act = (clip) => clip && (actions[clip.name] ||= mixer.clipAction(clip));
-  const MAP = { idle: ['idle'], walk: ['walk'], run: ['sprint'], carry: [legsOnly, 'holding-both'], pickup: ['pick-up'], work: ['interact-right'], sit: ['sit'], cheer: ['emote-yes'] };
+  const MAP = { idle: ['idle'], walk: ['walk'], run: ['sprint'], carry: [legsOnly, 'holding-both'], pickup: ['pick-up'], work: ['interact-right'], tinker: ['interact-right'], stroll: ['walk'], gather: ['pick-up'], sit: ['sit'], cheer: ['emote-yes'] };
   // the clips sped up with the camp's faster workers (camp.js SPEED, WORK), so the feet keep up with the ground
-  const PACE = { walk: 2.25, run: 1.6, carry: 2.45, pickup: 2.4, work: 2.4 };
-  let playing = [];
+  // (tinker: busy at their own place between crates, the work's clip at an easy pace, Oleg 2026-11-07)
+  // (stroll and gather: about their place before anything is built there, camp.js chores)
+  const PACE = { walk: 2.25, run: 1.6, carry: 2.45, pickup: 2.4, work: 2.4, tinker: 0.9, stroll: 0.9, gather: 1.1 };
+  let playing = [], now = '';
   // the neckerchief on the torso bone
   let torso = null;
   model.traverse((o) => o.name === 'torso' && (torso = o));
@@ -269,7 +271,9 @@ function kenneyCamper(c, color, models, who) {
     },
     play(s) {
       const next = (MAP[s] || MAP.idle).map((x) => act(typeof x === 'string' ? clips[x] : x)).filter(Boolean);
-      if (next.length === playing.length && next.every((a, k) => a === playing[k])) return;
+      if (s === now) return;
+      now = s;
+      if (next.length === playing.length && next.every((a, k) => a === playing[k])) return void next.forEach((a) => a.setEffectiveTimeScale(PACE[s] || 1));
       for (const a of playing) if (!next.includes(a)) a.fadeOut(0.2);
       for (const a of next) a.reset().setEffectiveTimeScale(PACE[s] || 1).fadeIn(0.2).play();
       playing = next;

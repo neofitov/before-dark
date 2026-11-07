@@ -10,7 +10,7 @@ export const KINDS = ['breeze', 'rain', 'mist', 'clear'];
 const LOOK = {   // wind, sun, sky light, grey, fog near/far, rain, leaves
   clear: { wind: 0.15, sun: 1, hemi: 1, grey: 0, fogNear: 1, fogFar: 1, rain: 0, leaves: 0 },
   breeze: { wind: 0.55, sun: 1, hemi: 1, grey: 0, fogNear: 1, fogFar: 1, rain: 0, leaves: 1 },
-  rain: { wind: 0.7, sun: 0.38, hemi: 0.85, grey: 0.65, fogNear: 0.85, fogFar: 0.7, rain: 1, leaves: 0.3 },
+  rain: { wind: 0.7, sun: 0.5, hemi: 0.95, grey: 0.65, fogNear: 0.85, fogFar: 0.7, rain: 1, leaves: 0.3 },
   mist: { wind: 0.1, sun: 0.7, hemi: 1.05, grey: 0.35, fogNear: 0.72, fogFar: 0.55, rain: 0, leaves: 0 },
 };
 

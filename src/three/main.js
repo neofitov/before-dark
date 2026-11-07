@@ -12,14 +12,17 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { LEVELS } from '../slide/levels.js';
 import { CAMPAIGN } from './campaign.js';
-import { reach, pathTo, exitGate, startPos, left, gateOpen, stranded, nextBedtime } from '../slide/model.js';
+import { reach, pathTo, exitGate, exitSpot, startPos, left, gateOpen, stranded, nextBedtime, locked } from '../slide/model.js';
 import { darkMask, lostCrates } from '../slide/dark.js';
-import { makeWorld, plantForest, natureMaterial } from './world.js';
-import { buildBoard, buildCrate, waveFlags, stencilCanvas, SUPPLY, GROUND } from './board.js';
+import { makeWorld, plantForest, natureMaterial, LOW } from './world.js';
+import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, SUPPLY, GROUND } from './board.js';
 import { makeParticles, dustPuff, unpackBurst } from './fx.js';
-import { makeCamp, campKeepOut } from './camp.js';
+import { makeCamp, campKeepOut, campDepth } from './camp.js';
+import { EXTRAS, earned } from './extras.js';
+import { drawTrail, drawExtras, nextExtra, icon } from './trail.js';
 import { makeWeather, KINDS } from './weather.js';
 import * as sfx from './sound.js';
+import { makeEmber, makeBubble } from './ember.js';
 
 const KENNEY = ['barrel-open', 'barrel', 'chest', 'bedroll', 'resource-wood', 'bucket', 'box-open', 'stump_round', 'stump_old', 'deer', 'fox'];
 const PEOPLE = ['character-male-b', 'character-female-b', 'character-male-e', 'character-male-a', 'character-female-c', 'character-female-f'];
@@ -39,11 +42,39 @@ let showing = false;
 const watching = () => watchUrl || showing;
 // the levels: the game's three, or the prototype's ten; where a player is: saved (the furthest level reached), or ?level
 const LIST = q.has('proto') ? LEVELS : CAMPAIGN;
+// where progress is kept: the browser's storage; ?playtest keeps it in the tab (sessionStorage), so simulated players in
+// parallel tabs each have their own stars and none of it stays behind. ?playtest&seed=3322322 starts one as a returning
+// player, with those stars won on levels 1, 2, ...
+const store = (() => {
+  try {
+    return q.has('playtest') ? sessionStorage : localStorage;
+  } catch {
+    return null;
+  }
+})();
+try {
+  if (q.has('playtest') && q.has('seed') && !store.getItem('bd3.reached')) {
+    const seed = [...q.get('seed')].map(Number);
+    store.setItem('bd3.reached', String(seed.length));
+    store.setItem('bd3.stars', JSON.stringify({ ...seed }));
+    store.setItem('bd.howto', '1');
+  }
+} catch {}
 let reached = 0;
 try {
-  reached = Number(localStorage.getItem('bd3.reached')) || 0;
+  reached = Number(store.getItem('bd3.reached')) || 0;
 } catch {}
-let levelIndex = Math.min(Math.max((Number(q.get('level')) || (q.has('proto') ? 5 : q.has('playtest') ? 1 : reached + 1)) - 1, 0), LIST.length - 1);
+// the most stars won on each level, saved (benchmark 2026-10-28, item 2): the camp trail shows them, and their total earns the
+// camp's extras (extras.js); ?stars=N stands for a total of N (checks, covers)
+let best = {};
+try {
+  best = JSON.parse(store.getItem('bd3.stars') || '{}') || {};
+} catch {}
+const starTotal = () => (q.has('stars') ? Number(q.get('stars')) || 0 : Object.values(best).reduce((s, n) => s + n, 0));
+// what the last win earned (the win card shows it): extras new to the camp, stars more than the level's best; and the total
+// the HUD shows, which counts the new stars in as they fly to it
+let fresh = [], gained = 0, shownTotal = starTotal();
+let levelIndex = Math.min(Math.max((Number(q.get('level')) || (q.has('proto') ? 5 : q.has('playtest') && !q.has('seed') ? 1 : reached + 1)) - 1, 0), LIST.length - 1);
 const $ = (id) => document.getElementById(id);
 const clamp = THREE.MathUtils.clamp;
 // whose campers: Kenney's Mini Characters (Oleg's pick, 2026-10-24); ?people=own shows the ones drawn in code (people.js)
@@ -79,14 +110,17 @@ async function loadModels() {
     sizes.set(n, { x: s.x, y: s.y, z: s.z, top: box.max.y });
     gltfs.set(n, g);
   }).catch((e) => console.warn('model', n, e));
+  const all = KENNEY.length + PEOPLE.length + NATURE.length;
+  let done = 0;
+  const tick = (p) => p.then(() => ($('loadBar') && ($('loadBar').style.width = `${4 + (96 * ++done) / all}%`)));
   await Promise.all([
-    ...KENNEY.map((n) => load(n, `assets/models/${n}.glb`)),
-    ...PEOPLE.map((n) => load(n, `assets/models/people/${n}.glb`)),
-    ...NATURE.map((n) => load(n, `assets/nature/${n}.glb`, true)),
+    ...KENNEY.map((n) => tick(load(n, `assets/models/${n}.glb`))),
+    ...PEOPLE.map((n) => tick(load(n, `assets/models/people/${n}.glb`))),
+    ...NATURE.map((n) => tick(load(n, `assets/nature/${n}.glb`, true))),
   ]);
 }
 
-let L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
+let campPortrait = false, L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
 // the largest board in the game: the camp's places and the forest's clearing are the same in every level
 const SIZE = { w: Math.max(...LIST.map((l) => l.w)), h: Math.max(...LIST.map((l) => l.h)) };
 
@@ -106,7 +140,7 @@ function story(k) {
     prior[c] = total[c];
     if (!colors.includes(c)) colors.push(c);
   }
-  return q.has('proto') ? null : { colors, prior, total, size: SIZE, count };
+  return q.has('proto') ? null : { colors, prior, total, size: SIZE, count, extras: earned(starTotal()) };
 }
 
 function cellCenter(i, x, y) {
@@ -126,8 +160,12 @@ function load() {
   board = buildBoard(scene, models, L, { gates: q.get('gates') });
   spots = board.spots;
   const [vw, vh] = viewSize();
-  camp = makeCamp(scene, models, board, L, fx, peopleStyle, vh > vw, story(levelIndex));
+  campPortrait = vh > vw;
+  camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, story(levelIndex));
   lostTo = null;
+  hinted = note = thinking = null;
+  hintAsk++;   // a search still running is for the last try
+  ember.close();
   firstMove = true;
   duskShown = 0;
   pos = startPos(L);
@@ -136,11 +174,18 @@ function load() {
   state = 'play';
   drag = null;
   endAt = wonAt = cheered = 0;
+  celebrate = 0;
+  fresh = [];
+  gained = 0;
+  shownTotal = starTotal();
   crates = L.blocks.map((b, i) => {
-    const c = buildCrate(models, b), at = cellCenter(i, b.x, b.y);
+    // two padlocks or more: each lock and its key carry the same number (playtest 2026-10-29, level 16: both locks yellow, two
+    // yellow crates with keys, "which key opens which lock?")
+    const locks = L.blocks.filter((o) => o.lock != null), n = locks.length > 1 ? locks.indexOf(b.lock != null ? b : locks.find((o) => o.lock === i)) + 1 : 0;
+    const c = buildCrate(models, b, { key: L.blocks.some((o) => o.lock === i), lockColor: b.lock != null ? L.blocks[b.lock].color : null, mark: n > 0 ? n : null }), at = cellCenter(i, b.x, b.y);
     c.group.position.copy(at);
     scene.add(c.group);
-    return { ...c, b, i, cur: at.clone(), target: at.clone(), vel: new THREE.Vector3(), path: [], lift: 0, liftV: 0, squash: 0, squashV: 0, tiltX: 0, tiltZ: 0, jig: 0, out: null, gone: false, trip: 0 };
+    return { ...c, b, i, cur: at.clone(), target: at.clone(), vel: new THREE.Vector3(), path: [], lift: 0, liftV: 0, squash: 0, squashV: 0, tiltX: 0, tiltZ: 0, jig: 0, out: null, gone: false, trip: 0, lockK: 1 };
   });
   $('card').classList.remove('on');
   legend();
@@ -148,6 +193,30 @@ function load() {
   view = 'play';
   resize();
   sfx.jingle('start');
+}
+
+// setting a level up takes a moment (the camp and its builds made anew, then drawn: about a quarter of a second on a PC, a
+// second on a phone) and the page stands still meanwhile (Oleg, 2026-11-07: "restart button freezes the game - add a
+// loading indicator"): a spinner shows first, the work runs once it is on screen, and it goes after the new level's first
+// frame. Tests (?playtest) run it at once
+let busyNow = false;
+function busy(fn) {
+  if (playtest || film || cover) return fn();
+  if (busyNow) return;
+  busyNow = true;
+  $('busy').classList.add('on');
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    try {
+      fn();
+      renderer.compile(scene, camera);
+      renderer.render(scene, camera);
+    } finally {
+      requestAnimationFrame(() => {
+        busyNow = false;
+        $('busy').classList.remove('on');
+      });
+    }
+  }));
 }
 
 // ---- the physical drag: the crate's footprint (in cells, fractions allowed) against walls, crates, the frame and gates ----
@@ -226,6 +295,10 @@ function gatePull(i, x, y, dx, dy, occ) {
 // a finger that turns a little early or holds the crate off its middle still gets there, playtest 2026-10-24); with no
 // lane open it slides along what blocks it. Pulled in line with its gate, the finger's sideways wobble no longer counts.
 function slideStep(i, x, y, dx, dy, tx, ty, occ) {
+  // a heavy crate on runners goes only along them (2026-10-28): the finger's other way does not count
+  const axis = L.blocks[i].axis;
+  if (axis === 'x') (dy = 0), (ty = y);
+  if (axis === 'y') (dx = 0), (tx = x);
   const pull = gatePull(i, x, y, dx, dy, occ);
   if (pull) {
     ({ x, y } = pull);
@@ -236,7 +309,7 @@ function slideStep(i, x, y, dx, dy, tx, ty, occ) {
   let a = h ? x : y, c = h ? y : x;
   const da = h ? dx : dy, dc = h ? dy : dx, tc = h ? ty : tx;
   const free = (a2, c2) => fits(i, ...P(a2, c2), occ), go = (sa, sc) => sweep(i, ...P(a, c), ...P(sa, sc), occ);
-  if (!pull) {
+  if (!pull && !axis) {
     let lane = null;
     if (Math.abs(da) > 1e-3 && !free(a + da, c)) {
       // only a lane where the finger is (a lane a row away from it would carry the crate off past the finger)
@@ -279,6 +352,10 @@ function grab(i, gx, gy) {
   drag = { i, from: pos[i].slice(), before: pos.map((p) => (p ? p.slice() : null)), grabX: gx - pos[i][0], grabY: gy - pos[i][1], fx: pos[i][0], fy: pos[i][1], tx: pos[i][0], ty: pos[i][1], occ: occupancy(i), cell: pos[i].join() };
   crates[i].liftV += 2;
   sfx.play('pick', 0.5);
+  // the hand (a hint, level 1's lesson) is done with once a crate is in hand
+  $('hand').style.opacity = 0;
+  hinted = null;
+  if (!thinking) ember.close();
 }
 
 function steer(gx, gy) {
@@ -324,18 +401,268 @@ function follow(dt) {
   moved(false);
 }
 
+// ---- the win's fireworks: bursts in the crews' colours over the camp for a few seconds ----
+let celebrate = 0, nextBurst = 0;
+function fireworks(dt) {
+  if (celebrate <= 0) return;
+  celebrate -= dt;
+  if ((nextBurst -= dt) > 0) return;
+  nextBurst = 0.18 + Math.random() * 0.22;
+  const sites = Object.values(camp.sites), s = sites[Math.floor(Math.random() * sites.length)], colors = Object.keys(camp.sites);
+  const color = parseInt(SUPPLY[colors[Math.floor(Math.random() * colors.length)]].flag.slice(1), 16);
+  const x = (s ? s.pos.x * 0.7 : 0) + (Math.random() - 0.5) * 4, z = (s ? s.pos.z * 0.7 : 0) + (Math.random() - 0.5) * 4, y = 4.5 + Math.random() * 2;
+  for (let k = 0; k < 40; k++) {
+    const a = Math.random() * Math.PI * 2, b = Math.acos(Math.random() * 2 - 1), sp = 3.4 + Math.random() * 1.4;
+    fx.glow.spawn({ x, y, z, vx: Math.sin(b) * Math.cos(a) * sp, vy: Math.cos(b) * sp, vz: Math.sin(b) * Math.sin(a) * sp, life: 1.1 + Math.random() * 0.5, size: 0.32, color, alpha: 1, gravity: 1.4, drag: 1.1 });
+  }
+  fx.glow.spawn({ x, y, z, life: 0.35, size: 2.2, color: 0xfff2c8, alpha: 0.8 });   // the flash at its heart
+  sfx.play('pick', 0.12, 2.2);
+}
+
 // ---- the first level teaches by doing: until the first crate is picked up, a hand drags the level's first move (its crate
-// out through its gate, along its path), over and over. Returns the crate's colour while the hand holds it (its lane
-// lights, as for a player) ----
-let handT = 0;
+// out through its gate, along its path), over and over; then, once a crate can go out round a corner and until the player
+// has dragged one round a corner, that drag (playtest 2026-10-29: four of five players found corner drags by accident, level
+// 4's card was the first to tell, and level 1's target needs them). Returns the crate's colour while the hand holds it (its
+// lane lights, as for a player) ----
+let handT = 0, cornerAt = -1, corner = null, turnedOnce = false;
+// ---- the hint (playtest 2026-10-29, Leo, Dan, Jonas; benchmark 2026-11-07: help with one move during a level, not only "Show
+// me" after it): the best next move from here, shown by the same hand, until a crate is picked up. On the level's own way
+// that is its next move; off it, the solver works out the best way on in a worker (a big board takes seconds); with no way
+// left in the moves there are, it says how far to undo ----
+let hinted = null, hintAsk = 0, hintWorker = null, hintBusy = false;
+const posKey = (p) => p.map((c) => (c ? c.join() : '-')).join(';');
+// where the level's own way stands after k of its moves
+function wayAt(k) {
+  let p = startPos(L);
+  for (const m of L.solution.slice(0, k)) {
+    p = p.slice();
+    p[m.i] = m.exit ? null : m.to;
+  }
+  return posKey(p);
+}
+// ---- Ember, the camp's helper (ember.js; 2026-11-07, Oleg: "its good AI vibe i want to enhance the AI look and feel"):
+// asked, it thinks where it can be seen: sparks trace moves it could make over the board, a light sweeps the board, its card
+// counts the positions the solver has looked at (the solver's own count). Then it answers: the move (a glowing copy of the
+// crate shows it), what that leaves (the moves to finish, the stars still possible), why (from the rules: its crew's
+// bedtime, a padlock it opens, a crate it clears the way for) and the camp's next bedtime or crew back late, no longer
+// always in the hint line. It thinks for a second at least and at most 3 (1.2 on the level's own way, whose next move it
+// then falls back on: always a way, at the target)
+const ember = makeEmber($('ember'), q.has('playtest')), bubble = makeBubble($('hint'), $('hintBtn'), q.has('playtest'));
+let thinking = null, emberUntil = 0;
+$('ember').onclick = () => {
+  if (thinking) return;
+  hinted = null;
+  ember.close();
+};
+function hint() {
+  if (state !== 'play' || watching() || drag || q.has('proto') || thinking) return;
+  const ask = ++hintAsk, at = posKey(pos) + '|' + moves, onWay = posKey(pos) === wayAt(moves), t0 = performance.now();
+  hinted = null;
+  emberUntil = 0;
+  thinking = { next: 0, blip: 0, s: 0 };
+  ember.think();
+  const finish = (r) => {
+    if (ask !== hintAsk) return;
+    setTimeout(() => {
+      if (ask !== hintAsk) return;
+      thinking = null;
+      if (at !== posKey(pos) + '|' + moves || state !== 'play') return ember.close();
+      answer(r);
+    }, q.has('playtest') ? 0 : Math.max(0, 1000 - (performance.now() - t0)));
+  };
+  const fallback = (r) => (r.move || !onWay ? r : { move: L.solution[moves], par: L.par, states: r.states });
+  if (hintBusy) {
+    hintWorker.terminate();
+    hintWorker = null;
+  }
+  try {
+    hintWorker ||= new Worker(new URL('./hint-worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    return finish(fallback({ move: null, states: 0, capped: true }));
+  }
+  hintBusy = true;
+  hintWorker.onmessage = ({ data }) => {
+    if (data.ask !== hintAsk) return;
+    if (data.progress != null) return ember.progress(data.progress);
+    hintBusy = false;
+    ember.progress(data.states);
+    finish(fallback(data));
+  };
+  hintWorker.postMessage({ ask, level: L, pos, moves, aside: L.budget - moves - left(pos), secs: onWay ? 1.2 : 3 });
+}
+const crewName = (c, lower = false) => (lower ? CREW_NAME[c].replace(/^The/, 'the') : CREW_NAME[c]);
+const movesWord = (n) => (n === 1 ? 'one move' : `${n} moves`);
+function answer(r) {
+  if (!r.move) return offWay(r.capped);
+  const m = r.move, name = SUPPLY[L.blocks[m.i].color].name, more = r.par - moves, stars = starsFor(r.par), why = reasonFor(m);
+  hinted = { m, at: moves, until: t + 14 };
+  ember.answer({
+    say: m.exit ? `Move the ${name} crate out through its gate.` : `Move the ${name} crate where the glow shows.`,
+    facts: `Best from here: ${more} more move${more === 1 ? '' : 's'} · ${stars === 3 ? '★★★ still possible' : stars === 2 ? 'now ★★ at best' : 'now ★ at best'}`,
+    why: [why.text, headsUp(why.crew)].filter(Boolean).join(' '),
+  });
+  sfx.chime([784, 1047, 1319], 0.06, 0.8);
+}
+// why this move, from the rules: its crew's bedtime close, the key it holds, a crate it opens the way for; else what it is
+function reasonFor(m) {
+  const b = L.blocks[m.i], name = SUPPLY[b.color].name;
+  const bed = L.gates.filter((g) => g.color === b.color && g.closeAt > moves).sort((a, c) => a.closeAt - c.closeAt)[0];
+  if (m.exit && bed && bed.closeAt - moves <= 3) return { text: `${crewName(b.color)} goes to bed in ${movesWord(bed.closeAt - moves)}, so the ${name} goes first.`, crew: b.color };
+  const opens = L.blocks.findIndex((o, k) => o.lock === m.i && pos[k]);
+  if (m.exit && opens >= 0) return { text: `It holds the key to the padlocked ${SUPPLY[L.blocks[opens].color].name} crate.` };
+  const after = pos.map((p) => p && p.slice());
+  after[m.i] = m.exit ? null : m.to.slice();
+  const freed = L.blocks.findIndex((o, k) => k !== m.i && pos[k] && !exitSpot(L, pos, k, darkMask(L, moves), moves) && exitSpot(L, after, k, darkMask(L, moves + 1), moves + 1));
+  if (freed >= 0) return { text: `That opens the way out for the ${SUPPLY[L.blocks[freed].color].name} crate.` };
+  return { text: m.exit ? 'Nothing stands in its way: it can go out now.' : 'Parked there, it keeps the way clear for the next moves.' };
+}
+// the camp's next deadline: a crew back late, or the next crew to bed with crates still to come (not one the why named)
+function headsUp(said) {
+  const due = (k) => L.gates.filter((g) => g[k] > moves && pos.some((p, j) => p && L.blocks[j].color === g.color)).sort((a, c) => a[k] - c[k])[0];
+  const bed = due('closeAt'), late = due('openAt');
+  if (late && (!bed || late.openAt <= bed.closeAt)) return `Heads-up: ${crewName(late.color, true)} is back in ${movesWord(late.openAt - moves)}.`;
+  if (bed && bed.color !== said) return `Heads-up: ${crewName(bed.color, true)} goes to bed in ${movesWord(bed.closeAt - moves)}.`;
+  return '';
+}
+// no way on from here in the moves left (or none found in time): back to the last point on the level's own way
+function offWay(unsure) {
+  let k = moves - 1;
+  while (k > 0 && posKey(hist[k]) !== wayAt(k)) k--;
+  const back = moves - Math.max(k, 0), restart = back === moves && back > 3, el = restart ? $('restart') : $('undo');
+  el.classList.remove('pulse');
+  void el.offsetWidth;
+  el.classList.add('pulse');
+  emberUntil = t + 8;
+  ember.answer({
+    state: unsure ? 'not sure' : 'no way left',
+    say: unsure ? 'I can’t find a sure way on from here.' : 'There is no way to finish from here in the moves left.',
+    facts: restart ? 'Restart to try again.' : `Undo ${movesWord(back)} to get back on track.`,
+    why: headsUp(null),
+  });
+  sfx.chime([523, 440], 0.05, 0.6);
+}
+// thinking, seen: sparks trace a move it could make, again and again; a band of light sweeps the board; soft blips
+let scanBand = null;
+function emberThink(dt) {
+  if ((thinking.next -= dt) <= 0) {
+    thinking.next = 0.11;
+    const live = pos.map((p, i) => (p && !locked(L, pos, i) ? i : -1)).filter((i) => i >= 0), i = live[Math.floor(Math.random() * live.length)];
+    if (i != null) {
+      const r = reach(L, pos, i, pos[i], darkMask(L, moves)), c = r.cells.length > 1 && r.cells[1 + Math.floor(Math.random() * (r.cells.length - 1))];
+      if (c) pathTo(r, c[0], c[1]).forEach(([x, y], k) => {
+        const at = cellCenter(i, x, y);
+        fx.glow.spawn({ x: at.x, y: 0.72, z: at.z, life: 0.3 + k * 0.06, size: 0.26, color: 0x7fe6ff, alpha: 0.85 });
+      });
+    }
+  }
+  if ((thinking.blip -= dt) <= 0) {
+    thinking.blip = 0.32;
+    sfx.chime([1318], 0.022, 0.12);
+  }
+  if (!scanBand) {
+    const cv = document.createElement('canvas');
+    cv.width = 4;
+    cv.height = 64;
+    const g = cv.getContext('2d'), grad = g.createLinearGradient(0, 0, 0, 64);
+    grad.addColorStop(0, '#000');
+    grad.addColorStop(0.5, '#fff');
+    grad.addColorStop(1, '#000');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 4, 64);
+    scanBand = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.9).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x7fe6ff, alphaMap: new THREE.CanvasTexture(cv), transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false }));
+    scanBand.renderOrder = 5;
+    scene.add(scanBand);
+  }
+  thinking.s = (thinking.s + dt / 0.9) % 1;
+  scanBand.scale.set(L.w + 0.4, 1, 1);
+  scanBand.position.set(board.ox + L.w / 2, 0.74, board.oz - 0.45 + thinking.s * (L.h + 0.9));
+}
+// the hinted move shown by a glowing copy of its crate gliding its way, out through the gate too, over and over
+let ghostT = 0, ghostOf = null, ghostObj = null;
+// (a plain cyan tint: added light washed out over the pale floor)
+const holo = new THREE.MeshBasicMaterial({ color: 0x3fd4ff, transparent: true, opacity: 0.62, depthWrite: false });
+let ghostSpark = 0;
+function ghost(dt, m) {
+  if (!m) {
+    if (ghostObj) scene.remove(ghostObj);
+    ghostObj = ghostOf = null;
+    return;
+  }
+  if (ghostOf !== m) {
+    if (ghostObj) scene.remove(ghostObj);
+    ghostObj = crates[m.i].group.clone(true);
+    ghostObj.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = holo;
+      o.castShadow = o.receiveShadow = false;
+    });
+    scene.add(ghostObj);
+    ghostOf = m;
+    ghostT = 0;
+  }
+  const pts = pathTo(reach(L, pos, m.i, pos[m.i], darkMask(L, moves)), m.to[0], m.to[1]).map(([x, y]) => cellCenter(m.i, x, y));
+  if (m.exit) {
+    const o = OUT[exitGate(L, m.i, m.to[0], m.to[1], moves).side];
+    pts.push(pts[pts.length - 1].clone().add(new THREE.Vector3(o[0] * 1.3, 0, o[1] * 1.3)));
+  }
+  ghostT = (ghostT + dt) % 2.8;
+  const lens = pts.slice(1).map((p, k) => p.distanceTo(pts[k])), all = lens.reduce((a, c) => a + c, 0) || 1;
+  let left = Math.min(1, Math.max(0, (ghostT - 0.35) / 1.7)) * all, k = 0;
+  while (k < lens.length - 1 && left > lens[k]) left -= lens[k++];
+  const at = lens.length ? pts[k].clone().lerp(pts[k + 1], lens[k] ? Math.min(1, left / lens[k]) : 0) : pts[0];
+  ghostObj.position.set(at.x, 0.08 + 0.04 * Math.sin(ghostT * 7), at.z);
+  const fade = ghostT < 0.3 ? ghostT / 0.3 : ghostT > 2.2 ? Math.max(0, 1 - (ghostT - 2.2) / 0.5) : 1;
+  holo.opacity = 0.62 * fade;
+  // a trail of sparks behind it as it glides
+  if ((ghostSpark -= dt) <= 0 && fade > 0.5 && ghostT > 0.35 && ghostT < 2.1) {
+    ghostSpark = 0.06;
+    fx.glow.spawn({ x: at.x + (Math.random() - 0.5) * 0.4, y: 0.45 + Math.random() * 0.3, z: at.z + (Math.random() - 0.5) * 0.4, life: 0.5, size: 0.2, color: 0x9ff3ff, alpha: 0.75 });
+  }
+}
+// a crate that can go out now round at least one corner: the shortest such drag, or null
+function cornerMove() {
+  if (cornerAt === moves) return corner;
+  cornerAt = moves;
+  corner = null;
+  const mask = darkMask(L, moves);
+  L.blocks.forEach((b, i) => {
+    if (!pos[i]) return;
+    const r = reach(L, pos, i, pos[i], mask);
+    for (const c of r.cells) {
+      const g = exitGate(L, i, c[0], c[1], moves);
+      if (!g) continue;
+      const path = pathTo(r, c[0], c[1]), dirs = path.slice(1).map((p, k) => [p[0] - path[k][0], p[1] - path[k][1]]).concat([OUT[g.side]]);
+      const turns = dirs.some((d, k) => k && (d[0] !== dirs[k - 1][0] || d[1] !== dirs[k - 1][1]));
+      if (turns && (!corner || path.length < corner.len)) corner = { i, to: c, exit: true, len: path.length };
+    }
+  });
+  return corner;
+}
 function teach(dt) {
-  const el = $('hand'), on = levelIndex === 0 && moves === 0 && !drag && state === 'play' && !watching() && !q.has('proto') && !$('howto').classList.contains('on');
-  if (!on) {
+  if (hinted && (drag || hinted.at !== moves || t > hinted.until || state !== 'play')) {
+    hinted = null;
+    if (!thinking) ember.close();
+  }
+  if (!hinted && !thinking && emberUntil && t > emberUntil) {
+    emberUntil = 0;
+    ember.close();
+  }
+  const free = !drag && state === 'play' && !watching() && !$('howto').classList.contains('on'), el = $('hand');
+  // a hint: the glowing copy of its crate, the crate's lane lit
+  ghost(dt, free && hinted ? hinted.m : null);
+  if (free && hinted) {
+    el.style.opacity = 0;
+    handT = 0;
+    return L.blocks[hinted.m.i].color;
+  }
+  // level 1's lesson: the hand
+  const m = free && levelIndex === 0 && !q.has('proto') && (moves === 0 ? L.solution[0] : !turnedOnce ? cornerMove() : null);
+  if (!m) {
     el.style.opacity = 0;
     handT = 0;
     return null;
   }
-  const m = L.solution[0], b = L.blocks[m.i], p = pos[m.i];
+  const b = L.blocks[m.i], p = pos[m.i];
   const pts = [[p[0], p[1]], ...pathTo(reach(L, pos, m.i, p, darkMask(L, moves)), m.to[0], m.to[1]).slice(1)].map(([x, y]) => [x + b.w / 2, y + b.h / 2]);
   if (m.exit) {
     const o = OUT[exitGate(L, m.i, m.to[0], m.to[1], moves).side], e = pts[pts.length - 1];
@@ -356,11 +683,35 @@ function teach(dt) {
 // pulled against something it cannot pass: the crate shakes with a knock, and what stops it (a crate, a rock, the frame)
 // flashes red (playtest 2026-10-24: a blocked crate just did nothing, "it feels broken")
 let lastNoWay = 0;
+// a word in the hint line for a moment, in game time (a still picture just after still has it): why a drag was refused, the
+// hint
+let note = null;
+function say(text, secs = 2.6, hint = false) {
+  note = text ? { text, until: t + secs, hint } : null;
+  ui();
+}
+// a padlocked crate tried: its padlock rattles, and the hint names the crate with its key for a moment
+function rattle(i) {
+  const key = L.blocks[L.blocks[i].lock];
+  crates[i].jig = 1;
+  sfx.play('bump', 0.35, 1.6);
+  const p = pos[i], b = L.blocks[i], cells = [];
+  for (let j = 0; j < b.h; j++) for (let k = 0; k < b.w; k++) cells.push([p[0] + k, p[1] + j]);
+  board.flash(cells);
+  say(`Padlocked: its key is in the ${SUPPLY[key.color].name} crate`);
+}
+
 function noWay() {
   if (!drag || t - lastNoWay < 0.7) return;
   const i = drag.i, b = L.blocks[i], dx = drag.tx - drag.fx, dy = drag.ty - drag.fy;
   if (Math.hypot(dx, dy) < 0.45) return;
   lastNoWay = t;
+  // a heavy crate pulled across its skids
+  if (b.axis && (b.axis === 'x' ? Math.abs(dy) > Math.abs(dx) : Math.abs(dx) > Math.abs(dy))) {
+    crates[i].jig = 1;
+    sfx.play('bump', 0.22, 0.85);
+    return say('Heavy crate: it slides only the way its arrows point');
+  }
   const x0 = Math.round(drag.fx), y0 = Math.round(drag.fy), cells = [];
   if (Math.abs(dx) >= Math.abs(dy)) for (let k = 0; k < b.h; k++) cells.push([dx > 0 ? x0 + b.w : x0 - 1, y0 + k]);
   else for (let k = 0; k < b.w; k++) cells.push([x0 + k, dy > 0 ? y0 + b.h : y0 - 1]);
@@ -374,6 +725,18 @@ function noWay() {
   crates[i].jig = 1;
   crates[i].squashV -= 1;
   sfx.play('bump', 0.22, 0.85);
+  // into the frame where a gate is: why it would not let the crate out (playtest 2026-10-29 and benchmark 2026-11-07: a drag
+  // into the wrong gate did nothing anyone could see)
+  const edge = hit.find(([x, y]) => x < 0 || y < 0 || x >= L.w || y >= L.h);
+  if (!edge) return;
+  const side = edge[0] < 0 ? 'left' : edge[0] >= L.w ? 'right' : edge[1] < 0 ? 'top' : 'bottom', across = side === 'left' || side === 'right';
+  const lo = across ? y0 : x0, hi = lo + (across ? b.h : b.w), here = L.gates.filter((g) => g.side === side && g.at < hi && g.at + g.len > lo);
+  const mine = here.find((g) => g.color === b.color);
+  if (mine && mine.openAt > moves) say(`${CREW_NAME[b.color]} is not back yet`);
+  else if (mine && b.axis && (b.axis === 'x') !== across) say('Heavy crates leave only the way their arrows point');
+  else if (mine && (across ? b.h : b.w) > mine.len) say('Too wide for this gate');
+  else if (mine) say('Line it up with its gate');
+  else if (here.length) say(`Not this gate: this crate goes out by the ${b.color} flags`);
 }
 
 function moved(blocked) {
@@ -386,6 +749,7 @@ function moved(blocked) {
   ext.x1 = Math.max(ext.x1, drag.fx);
   ext.y0 = Math.min(ext.y0, drag.fy);
   ext.y1 = Math.max(ext.y1, drag.fy);
+  if (ext.x1 - ext.x0 > 0.6 && ext.y1 - ext.y0 > 0.6) turnedOnce = true;   // round a corner (level 1's lesson is learnt)
   // a soft tick each time it crosses into another cell; a knock when it runs into something
   const cell = `${Math.round(drag.fx)},${Math.round(drag.fy)}`;
   if (cell !== drag.cell) {
@@ -494,8 +858,13 @@ function endMove(i, from, before) {
     wonAt = t;
     if (!q.has('proto') && !watching()) {
       reached = Math.max(reached, Math.min(levelIndex + 1, LIST.length - 1));
+      const had = earned(starTotal()), before = best[levelIndex] || 0;
+      best[levelIndex] = Math.max(before, starsFor(moves));
+      gained = best[levelIndex] - before;
+      fresh = earned(starTotal()).filter((id) => !had.includes(id));
       try {
-        localStorage.setItem('bd3.reached', String(reached));
+        store.setItem('bd3.reached', String(reached));
+        store.setItem('bd3.stars', JSON.stringify(best));
       } catch {}
     }
   } else if (moves >= L.budget) {
@@ -570,6 +939,7 @@ canvas.addEventListener('pointerdown', (e) => {
   let i = blockAt(Math.floor(g.x), Math.floor(g.y));
   if (i < 0) i = crateNear(g.x, g.y);
   if (i < 0) return;
+  if (locked(L, pos, i)) return rattle(i);
   try {
     canvas.setPointerCapture(e.pointerId);
   } catch {}
@@ -585,26 +955,58 @@ canvas.addEventListener('pointercancel', release);
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 $('restart').onclick = () => {
   sfx.wake();
-  load();
+  busy(load);
 };
 $('undo').onclick = () => {
   sfx.wake();
   undo();
 };
-$('sound').onclick = () => {
+$('hintBtn').onclick = () => {
   sfx.wake();
-  sfx.toggleMute();
-  ui();
+  if (!showing) return hint();
+  showing = false;
+  bot = null;
+  busy(load);
 };
-$('help').onclick = () => {
+// settings (playtest 2026-10-28: published games all have sound and music apart, and a panel): sound, music, how to play,
+// restart
+function settingsUi() {
+  for (const [id, on] of [['setSound', sfx.soundOn()], ['setMusic', sfx.musicOn()]]) {
+    $(id).classList.toggle('off', !on);
+    $(id).querySelector('b').textContent = on ? 'on' : 'off';
+  }
+}
+$('gear').onclick = () => {
   sfx.wake();
+  settingsUi();
+  $('settings').classList.add('on');
+};
+$('setSound').onclick = () => {
+  sfx.wake();
+  sfx.setSound(!sfx.soundOn());
+  settingsUi();
+};
+$('setMusic').onclick = () => {
+  sfx.wake();
+  sfx.setMusic(!sfx.musicOn());
+  settingsUi();
+};
+$('setHelp').onclick = () => {
+  $('settings').classList.remove('on');
   $('howto').classList.add('on');
 };
+$('setRestart').onclick = () => {
+  $('settings').classList.remove('on');
+  showing = false;
+  busy(load);
+};
+$('setClose').onclick = () => $('settings').classList.remove('on');
+$('settings').onclick = (e) => e.target === $('settings') && $('settings').classList.remove('on');
 $('howtoGo').onclick = () => {
   sfx.wake();
   $('howto').classList.remove('on');
   try {
-    localStorage.setItem('bd.howto', '1');
+    store.setItem('bd.howto', '1');
   } catch {}
 };
 // the weather button is for reviews only (?review); players get each level's own weather
@@ -620,6 +1022,21 @@ $('weather').onclick = () => {
 // ---- the feel: springs, landings, deliveries ----
 
 function updateCrate(c, i, dt) {
+  if (c.lock) {
+    // the padlock and chains drop away a moment after the crate with its key has gone (back again on an undo)
+    const want = locked(L, pos, i) ? 1 : 0, was = c.lockK;
+    c.lockK = want ? Math.min(1, c.lockK + dt * 4) : Math.max(0, c.lockK - dt * 1.6);
+    const k = Math.min(1, c.lockK * 1.6);
+    c.lock.scale.setScalar(Math.max(0.001, k));
+    c.lock.visible = c.lockK > 0.01;
+    if (was >= 0.62 && c.lockK < 0.62) {
+      sfx.play('pick', 0.4, 1.5);
+      for (let n = 0; n < 24; n++) {
+        const a = Math.random() * Math.PI * 2, sp = 0.8 + Math.random() * 1.4;
+        fx.glow.spawn({ x: c.cur.x, y: 0.5 + Math.random() * 0.3, z: c.cur.z, vx: Math.cos(a) * sp, vy: 1.2 + Math.random() * 1.4, vz: Math.sin(a) * sp, life: 0.6 + Math.random() * 0.4, size: 0.1, color: 0xffe08a, alpha: 1, gravity: 2.4, drag: 1.2 });
+      }
+    }
+  }
   if (c.gone) return;
   const held = drag && drag.i === i;
   let target = c.path.length ? c.path[0] : c.target;
@@ -630,6 +1047,13 @@ function updateCrate(c, i, dt) {
         Object.assign(c.out, { phase: 'hop', t: 0, from: c.cur.clone(), fromLift: c.lift });
         sfx.play('bump', 0.3, 1.2);
         sfx.whoosh(true, 0.16);
+        // sparkles in its colour as it passes its gate
+        const col = parseInt(SUPPLY[c.b.color].flag.slice(1), 16);
+        for (let k = 0; k < 34; k++) {
+          const a = Math.random() * Math.PI * 2, sp = 1.2 + Math.random() * 2;
+          fx.glow.spawn({ x: c.cur.x, y: 0.4 + Math.random() * 0.4, z: c.cur.z, vx: Math.cos(a) * sp, vy: 1.4 + Math.random() * 2, vz: Math.sin(a) * sp, life: 0.7 + Math.random() * 0.5, size: k % 3 ? 0.17 : 0.12, color: k % 3 ? col : 0xfff2c8, alpha: 1, gravity: 2.6, drag: 1.2 });
+        }
+        fx.glow.spawn({ x: c.cur.x, y: 0.6, z: c.cur.z, life: 0.3, size: 1.6, color: col, alpha: 0.7 });
       }
     }
     if (c.out.phase === 'hop') return hop(c, i, dt);
@@ -702,6 +1126,8 @@ function hop(c, i, dt) {
   const trip = c.trip, live = () => c.trip === trip && !c.gone;
   c.api = {
     at: () => c.cur,
+    // its ground on the mat (the worker stands beside it to pick it up)
+    size: () => [c.b.w * c.group.scale.x, c.b.h * c.group.scale.x],
     // picked up: from now on the worker's hands move it
     lift() {
       if (!live()) return;
@@ -751,13 +1177,13 @@ function botStep(dt) {
       pts.push([m.to[0] + 0.5 + o[0] * (b.w + 0.6), m.to[1] + 0.5 + o[1] * (b.h + 0.6)]);
     }
     grab(m.i, p[0] + 0.5, p[1] + 0.5);
-    bot.step = { finger: [p[0] + 0.5, p[1] + 0.5], pts, pause: 0.15 };
+    bot.step = { finger: [p[0] + 0.5, p[1] + 0.5], pts, pause: slowBot() ? 0.55 : 0.15 };
     return;
   }
   if ((bot.step.pause -= dt) > 0) return;
   const f = bot.step.finger, goal = bot.step.pts[0];
   if (goal && drag) {
-    const dx = goal[0] - f[0], dy = goal[1] - f[1], d = Math.hypot(dx, dy), stepLen = 7.5 * dt;
+    const dx = goal[0] - f[0], dy = goal[1] - f[1], d = Math.hypot(dx, dy), stepLen = (slowBot() ? 4 : 7.5) * dt;
     if (d <= stepLen) {
       f[0] = goal[0];
       f[1] = goal[1];
@@ -772,8 +1198,11 @@ function botStep(dt) {
   release();
   bot.k++;
   bot.step = null;
-  bot.wait = m.exit ? 0.8 : 0.5;
+  bot.wait = slowBot() ? 1 : m.exit ? 0.8 : 0.5;
 }
+// "Show me" for a player: slower than the watching modes and the store videos (?watch, ?film), with a pause between moves
+// (playtest 2026-10-29: three players could not follow it)
+const slowBot = () => showing && !watchUrl;
 
 // ---- the evening, the camera, the HUD ----
 
@@ -783,6 +1212,7 @@ function botStep(dt) {
 // end card at the bottom (the card used to sit over the middle and hide the camp, the level's reward). The camera glides
 // from one frame to the next.
 let view = 'play';
+const UPRIGHT = Number(q.get('upright')) || 60;
 function frameFor(w, h, kind) {
   const board = [new THREE.Vector3(-L.w / 2 - 0.45, 0, -L.h / 2 - 0.45), new THREE.Vector3(L.w / 2 + 0.45, 0, L.h / 2 + 0.45)];
   for (const s of Object.values(spots)) board.push(s.pos.clone().addScaledVector(s.out, 0.7).addScaledVector(s.side, 0.9), s.pos.clone().addScaledVector(s.out, 0.7).addScaledVector(s.side, -0.9));
@@ -791,11 +1221,18 @@ function frameFor(w, h, kind) {
   camera.aspect = w / h;
   camera.fov = portrait ? 40 : 32;
   camera.updateProjectionMatrix();
-  const elev = THREE.MathUtils.degToRad(portrait ? 62 : 52), dir = new THREE.Vector3(0, Math.sin(elev), Math.cos(elev));
+  // a steeper look on the big boards, so tall crates don't lean over the next column (benchmark 2026-10-28)
+  const big = Math.max(L.w, L.h) >= 7 ? 1 : 0;
+  // and steeper still while playing (benchmark 2026-11-07: the tops of tall crates stood over the next row, so rows and gate
+  // widths read wrong); the camp and the end frame keep the lower, wider look, and the camera glides between them
+  const play = kind === 'play' ? (portrait ? 6 : 8) : 0;
+  // (upright, playing: the same angle in every level, low enough to show the camp's row behind the board)
+  const elev = THREE.MathUtils.degToRad(portrait && kind === 'play' ? UPRIGHT : (portrait ? 62 : 52) + big * (portrait ? 3 : 5) + play), dir = new THREE.Vector3(0, Math.sin(elev), Math.cos(elev));
   // the end frame keeps the end card's own height free at the bottom (measured once it shows; a short screen gets a compact card)
   const box = $('card').classList.contains('on') && $('card').querySelector('.box').getBoundingClientRect();
   const cardRoom = box && box.height ? box.height + 22 : portrait ? 250 : 210;
-  const top = 1 - (2 * (portrait ? 120 : 95)) / h, bottom = -1 + (2 * (kind === 'end' ? cardRoom : 40)) / h;
+  // (a phone keeps room at the bottom for the hint line and its button)
+  const top = 1 - (2 * (portrait ? 120 : 95)) / h, bottom = -1 + (2 * (kind === 'end' ? cardRoom : portrait ? 110 : 40)) / h;
   // the distance at which a set of ground points fits between the margins, slid along the ground so they sit in the middle
   // of the space between the top bar and the bottom margin (the end card's room)
   const span = (look, d, corners) => {
@@ -832,16 +1269,31 @@ function frameFor(w, h, kind) {
   if (kind !== 'play') return { ...whole, dir };
   // playing: on a phone the board and its gates' paths fill the width (the crates' landing spots and the camp run off the
   // sides); on a wide screen zoomed out from the board's own frame only as far as keeps the board big (a third at most)
+  // a phone upright (2026-11-07, Oleg: the camp in rows behind and in front of the board, "reduce board size just enough for
+  // the workers to be visible"): one framing for every level, the game's largest board and the ring round it where the gate
+  // workers stand across the phone's width, the camp's rows in the height left over (camp.js ROW); every level's cells are
+  // then the same size
   if (portrait) {
-    const m = 0.8, phone = fit([new THREE.Vector3(-L.w / 2 - m, 0, -L.h / 2 - m), new THREE.Vector3(L.w / 2 + m, 0, L.h / 2 + m)], 0.5);
-    return { ...phone, dir };
+    const ring = 1.15, phone = fit([new THREE.Vector3(-SIZE.w / 2 - ring, 0, -SIZE.h / 2 - ring), new THREE.Vector3(SIZE.w / 2 + ring, 0, SIZE.h / 2 + ring)], 0.5);
+    // then slid along the ground so the camp's whole depth, its row behind the board to the extras in front, sits in the
+    // middle of the room between the bars: a tall phone's extra height goes to the camp, not to empty ground (Oleg,
+    // 2026-11-07, on an Android phone: the top crowded, the bottom bare)
+    const [z0, z1] = campDepth(SIZE, true), ends = [new THREE.Vector3(0, 1.2, z0), new THREE.Vector3(0, GROUND, z1)], look = phone.look.clone();
+    let lo = look.z - 12, hi = look.z + 12;
+    for (let k = 0; k < 20; k++) {
+      look.z = (lo + hi) / 2;
+      const sp = span(look, phone.d, ends);
+      if ((sp.y0 + sp.y1) / 2 > (top + bottom) / 2) hi = look.z;
+      else lo = look.z;
+    }
+    return { look, d: phone.d, dir };
   }
   const near = fit(board);
   return whole.d <= near.d * 1.35 ? { ...whole, dir } : { look: near.look, d: near.d * 1.35, dir };
 }
 function fitCamera(w, h, glide = false) {
   const f = frameFor(w, h, view), u = camera.userData;
-  camera.userData = { look: glide && u.look ? u.look : f.look.clone(), d: glide && u.d ? u.d : f.d, dir: f.dir, to: f };
+  camera.userData = { look: glide && u.look ? u.look : f.look.clone(), d: glide && u.d ? u.d : f.d, dir: glide && u.dir ? u.dir : f.dir.clone(), to: f };
   world.fitFog(Math.max(f.d, frameFor(w, h, 'camp').d));
   const all = [...Object.values(spots).map((s) => s.pos), ...camp.extent()], box = new THREE.Box3().setFromPoints(all.map((p) => p.clone().setY(0)));
   box.expandByPoint(new THREE.Vector3(-L.w / 2 - 0.5, 0, -L.h / 2 - 0.5)).expandByPoint(new THREE.Vector3(L.w / 2 + 0.5, 0, L.h / 2 + 0.5));
@@ -855,8 +1307,11 @@ function setView(kind) {
 }
 
 function resize() {
+  rotateCheck();
   if (!L) return;
   const [w, h] = viewSize();
+  // turned before the first move: the camp laid out again for the new shape (its places differ upright and on its side)
+  if (h > w !== campPortrait && moves === 0 && state === 'play' && !drag && !watching() && !film && !cover) return busy(load);
   if (film || cover) renderer.setPixelRatio(1);
   renderer.setSize(w, h, false);
   fitCamera(w, h);
@@ -865,21 +1320,36 @@ function resize() {
 }
 new ResizeObserver(resize).observe(canvas);
 
+// a phone on its side (Oleg, 2026-11-07: "optimize the portrait mode only", then "should show on overlay blocking playing",
+// after Raccoon Gunner on jest.com): a screen over the whole game asks to turn it upright and goes when it turns. Phones
+// only: a touch screen with no hover, on its side and short; a desktop window, however shaped, plays on
+const phone = matchMedia('(hover: none) and (pointer: coarse)');
+// (a declaration, so resize() above can call it before this line has run)
+function rotateCheck() {
+  $('rotate').classList.toggle('on', phone.matches && innerWidth > innerHeight && innerHeight < 560 && !film && !cover);
+}
+addEventListener('resize', rotateCheck);
+matchMedia('(orientation: portrait)').addEventListener?.('change', rotateCheck);
+rotateCheck();
+
+const starsFor = (m) => (m <= L.par ? 3 : m <= L.par + 1 ? 2 : 1);
 function ui() {
-  const leftMoves = Math.max(0, L.budget - moves), stars = moves <= L.par ? 3 : moves <= L.par + 1 ? 2 : 1;
+  const leftMoves = Math.max(0, L.budget - moves);
+  $('starTotal').textContent = shownTotal;
   // the star goal up front ("Best: 9" read as somebody's score, playtest 2026-10-24)
   $('level').textContent = `Level ${levelIndex + 1}`;
   $('movesText').textContent = state === 'won' ? 'All delivered!' : leftMoves === 1 ? '1 move before dark' : `${leftMoves} moves before dark`;
   $('moves').classList.toggle('low', leftMoves <= 2 && state === 'play');
-  $('best').textContent = state === 'won' ? `${'★'.repeat(stars)}${'☆'.repeat(3 - stars)} in ${moves} moves` : `★★★ in ${L.par} moves`;
+  $('best').innerHTML = `<b>★★★</b> in ${L.par} moves`;
   $('undo').disabled = !hist.length || !(state === 'play' || (state === 'lost' && lostTo !== null));
-  $('sound').textContent = sfx.isMuted() ? '✕' : '♪';
-  // the dark's countdown, from level 2: when it takes its next cells
-  // bedtime's countdown, from level 2: the next gate to close that still has crates to come
-  const bed = state === 'play' ? L.gates.filter((g) => g.closeAt > moves && pos.some((p, k) => p && L.blocks[k].color === g.color)).sort((a, b) => a.closeAt - b.closeAt)[0] : null;
-  const n = bed && bed.closeAt - moves, crew = bed && CREW_NAME[bed.color];
-  $('hint').textContent = watching() ? (showing ? `The way in ${L.par} moves` : '') : bed ? (n === 1 ? `${crew} goes to bed after your next move` : `${crew} goes to bed in ${n} moves`) : levelIndex === 0 && !q.has('proto') && moves === 0 ? 'Drag a crate out through the gate of its colour' : levelIndex === 0 && !q.has('proto') && moves === 1 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '';
+  // (the countdowns to bedtime and to a crew back late live in Ember's answers since 2026-11-07, Oleg: "not displayed
+  // constantly but when the user uses the assistant"; the gates still carry their numbers)
+  bubble.set(note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : levelIndex === 0 && !q.has('proto') && moves === 0 ? 'Drag a crate out through the gate of its colour' : levelIndex === 0 && !q.has('proto') && moves > 0 && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : levelIndex === 0 && !q.has('proto') && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
   if (weather) $('weather').textContent = WEATHER_LABEL[weather.kind()];
+  const hb = $('hintBtn');
+  hb.hidden = watchUrl || cover || q.has('proto') || state !== 'play';
+  hb.classList.toggle('skip', showing);
+  hb.textContent = showing ? '⏭ Skip' : '✨ Ask Ember';
 }
 
 // a card's legend: each of this level's crates and the part of the camp it is for; colours not in `known` are marked new
@@ -899,27 +1369,51 @@ function legend(el = $('legend'), known = null) {
 
 // a new level's card: what is new on it (the dark, from level 2) and what it brings to the camp, the new parts marked
 // a level's card: one line, a picture and the new supplies (playtest 2026-10-24: the old cards were walls of text, read only
-// in bold)
+// in bold). The picture is bedtime's (in slice.html) unless the level brings something else new (PIC)
+const PIC = {
+  long: '<rect x="2" y="8" width="50" height="38" rx="3" fill="#dcc38e"/><rect x="5" y="20" width="44" height="13" rx="3" fill="#f0942e"/><path d="M13 20v13M41 20v13" stroke="#3c3a3a" stroke-width="2.4"/><path d="M27 23l4 7h-8z" fill="#f6ead0"/><path d="M2 40h50" stroke="#b49a68"/>',
+  heavy: '<rect x="2" y="8" width="50" height="38" rx="3" fill="#dcc38e"/><rect x="15" y="15" width="24" height="20" rx="3" fill="#f0c232"/><path d="M12 37h30" stroke="#2c2a2a" stroke-width="3.5" stroke-linecap="round"/><path d="M11 37l-2-4M43 37l2-4" stroke="#2c2a2a" stroke-width="3" stroke-linecap="round"/><path d="M4 25l7-6v12zM50 25l-7-6v12z" fill="#fff"/><path d="M27 18v14" stroke="#3c3a3a" stroke-width="1" opacity=".3"/>',
+  pond: '<rect x="2" y="2" width="50" height="50" rx="3" fill="#dcc38e"/><path d="M2 5a3 3 0 0 1 3-3h25v14H16v14H2z" fill="#3f8fc8"/><circle cx="11" cy="11" r="4.5" fill="#4f9a3a"/><circle cx="22" cy="9" r="3" fill="#4f9a3a"/><path d="M5 26v-8M8 27v-6M27 13v-8" stroke="#6a9a3a" stroke-width="1.6"/><rect x="31" y="31" width="14" height="14" rx="2" fill="#e0543a"/>',
+  padlock: '<rect x="3" y="18" width="30" height="24" rx="3" fill="#f0942e"/><path d="M3 30h30M18 18v24" stroke="#8a8c90" stroke-width="3.4"/><path d="M14 26v-3.5a4 4 0 0 1 8 0V26" stroke="#8a8c90" stroke-width="2.6" fill="none"/><rect x="11.5" y="25" width="13" height="11" rx="2" fill="#3b8fde"/><rect x="37" y="6" width="15" height="15" rx="2" fill="#3b8fde"/><circle cx="41.5" cy="13.5" r="2.6" stroke="#f2c440" stroke-width="1.8" fill="none"/><path d="M44 13.5h5.5M48 13.5v2.4" stroke="#f2c440" stroke-width="1.8"/>',
+  late: '<path d="M38 4l-9 16h18z M38 12l-11 18h22z" fill="#3e7a34"/><rect x="36.5" y="29" width="3" height="5" fill="#6a4628"/><rect x="2" y="36" width="50" height="6" rx="2" fill="#9a6a3c"/><g fill="#5a3a22"><rect x="8" y="26" width="3" height="16"/><rect x="13" y="26" width="3" height="16"/><rect x="18" y="26" width="3" height="16"/></g><rect x="6" y="25" width="17" height="3" fill="#f05a3c"/><circle cx="45" cy="47" r="3" fill="#ffd2a0"/><path d="M30 48h-8m3-3-3 3 3 3" stroke="#3e9e38" stroke-width="2.2" fill="none" stroke-linecap="round"/><circle cx="14" cy="15" r="6.5" fill="#e2f6d2" stroke="#3a2c4a" stroke-width="1.2"/><text x="14" y="18" font-size="8.5" font-weight="800" fill="#2a2238" text-anchor="middle" font-family="system-ui">4</text>',
+};
+let bedtimePic = null;
 const INTRO = [
   null,
   { title: 'Level 2: bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
   { title: 'Level 3: two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
-  { title: 'Level 4: round the rocks', rule: '<b>Rocks never move.</b> Drag a crate round them in one go.' },
+  { title: 'Level 4: round the rocks', rule: '<b>Rocks and stumps never move.</b> Drag a crate round them in one go.' },
   { title: 'Level 5: three early crews', rule: '<b>Three crews go to bed early.</b> Watch the numbers on the gates.' },
   { title: 'Level 6: tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.' },
   { title: 'Level 7: the whole camp', rule: '<b>Every crew is here:</b> all six gates.' },
+  { title: 'Level 8: long loads', rule: '<b>Long loads</b> are four cells long: they turn no corners in a tight spot.', pic: 'long' },
+  { title: 'Level 9: long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.' },
+  { title: 'Level 10: heavy crates', rule: '<b>Heavy crates run on skids:</b> only the way the arrows point.', pic: 'heavy' },
+  { title: 'Level 11: heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.' },
+  { title: 'Level 12: the pond', rule: '<b>A pond fills a corner.</b> Nothing crosses the water.', pic: 'pond' },
+  { title: 'Level 13: by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.' },
+  { title: 'Level 14: the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out.', pic: 'padlock' },
+  { title: 'Level 15: keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?' },
+  { title: 'Level 16: two padlocks', rule: '<b>Two padlocks:</b> the colour on each lock is the crate with its key.', pic: 'padlock' },
+  { title: 'Level 17: back late', rule: '<b>A crew is out in the forest.</b> Their gate opens when they are back.', pic: 'late' },
+  { title: 'Level 18: late and early', rule: '<b>One crew back late, one to bed early.</b> Time it.' },
+  { title: 'Level 19: a long evening', rule: '<b>Pond, padlock, skids, a late crew</b> and an early one.' },
+  { title: 'Level 20: the last night', rule: '<b>Everything at once</b>, and every crew in camp.' },
 ];
 function intro() {
+  $('intro').classList.remove('on');   // another level's, left under the camp trail
   const I = !q.has('proto') && !watching() && INTRO[levelIndex];
   if (!I) return;
   let seen = false;
   try {
-    seen = localStorage.getItem(`bd3.card${levelIndex}`) === '1';
+    seen = store.getItem(`bd3.card${levelIndex}`) === '1';
   } catch {}
   if (seen && !playtest) return;
   const before = new Set(LIST.slice(0, levelIndex).flatMap((l) => l.blocks.map((b) => b.color)));
   $('introTitle').textContent = I.title;
   $('introRule').innerHTML = I.rule;
+  bedtimePic ??= $('introPic').innerHTML;
+  $('introPic').innerHTML = PIC[I.pic] || bedtimePic;
   legend($('introLegend'), before);
   $('intro').classList.add('on');
 }
@@ -927,12 +1421,12 @@ $('introGo').onclick = () => {
   sfx.wake();
   $('intro').classList.remove('on');
   try {
-    localStorage.setItem(`bd3.card${levelIndex}`, '1');
+    store.setItem(`bd3.card${levelIndex}`, '1');
   } catch {}
 };
 
 function showCard() {
-  const won = state === 'won', stars = moves <= L.par ? 3 : moves <= L.par + 1 ? 2 : 1, last = levelIndex >= LIST.length - 1;
+  const won = state === 'won', stars = starsFor(moves), last = levelIndex >= LIST.length - 1;
   const button = (text, go, alt) => {
     const b = document.createElement('button');
     b.textContent = text;
@@ -947,31 +1441,45 @@ function showCard() {
   if (won) {
     $('cardTitle').textContent = last ? 'The camp is ready for the night' : 'Camp ready before dark';
     $('cardStars').textContent = '★'.repeat(stars) + '☆'.repeat(3 - stars);
+    if (!showing) $('cardTitle').textContent = last ? 'The camp is ready for the night!' : 'Camp ready!';
     if (showing) {
       $('cardTitle').textContent = `The way in ${L.par} moves`;
       $('cardStars').textContent = '';
       $('cardText').textContent = 'Your turn?';
-      button('Try it', () => ((showing = false), load()));
-      if (!last) button('Next level', () => ((showing = false), goTo(levelIndex + 1)), true);
+      button('Try it', () => ((showing = false), busy(load)));
+      if (!last) button('Next level', () => ((showing = false), busy(() => goTo(levelIndex + 1))), true);
     } else {
       $('cardText').textContent = `${moves} moves (target ${L.par})${last && !q.has('proto') ? '. More levels soon!' : ''}`;
-      if (!last) button('Next level', () => goTo(levelIndex + 1));
-      button('Play again', () => load(), !last);
-      if (stars < 3) button('Show me', () => ((showing = true), (bot = null), load()), true);
-      if (last && levelIndex > 0) button('From level 1', () => goTo(0), true);
+      if (!last) button('Next level', () => busy(() => goTo(levelIndex + 1)));
+      button('Play again', () => busy(load), !last);
+      if (stars < 3) button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
+      if (last) button('Camp trail', openTrail, true);
     }
   } else if (lostTo !== null) {
     $('cardTitle').textContent = 'Gone to bed';
     $('cardStars').textContent = '';
     $('cardText').textContent = `${CREW_NAME[L.blocks[lostTo].color]} shut the gate before the ${SUPPLY[L.blocks[lostTo].color].name} came.`;
     button('Undo', () => undo());
-    button('Try again', () => load(), true);
-    button('Show me', () => ((showing = true), (bot = null), load()), true);
+    button('Try again', () => busy(load), true);
+    button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
   } else {
     $('cardTitle').textContent = 'Night fell';
     $('cardStars').textContent = '';
     $('cardText').textContent = 'The camp was not ready in time.';
-    button('Try again', () => load());
+    button('Try again', () => busy(load));
+  }
+  $('card').classList.toggle('won', won && !showing);
+  $('cardExtra').innerHTML = '';
+  if (won && !showing) {
+    $('cardStars').innerHTML = [0, 1, 2].map((k) => `<span class="star${k < stars ? '' : ' off'}" style="animation-delay:${0.35 + k * 0.28}s">★</span>`).join('');
+    for (let k = 0; k < stars; k++) setTimeout(() => sfx.star(k), 350 + k * 280);
+    celebrate = 3.2;
+    // the camp's new extra pops up as the stars land; the card names it, or says what the next one needs
+    const total = starTotal(), next = nextExtra(total), extra = fresh.length && EXTRAS.find((e) => e.id === fresh[fresh.length - 1]);
+    for (const id of fresh) camp.extras.reveal(id, 1.3);
+    if (extra) $('cardExtra').innerHTML = `<span class="unlock">${icon(extra.id, 26)}<span>New for the camp: <b>${extra.name}</b>!</span></span>`;
+    else if (!q.has('proto')) $('cardExtra').innerHTML = next ? `★ ${total} · ${next.need} more for the ${next.name.toLowerCase()}` : `★ ${total} · every extra is in the camp`;
+    flyStars(stars - gained, stars);
   }
   $('card').classList.add('on');
   if (view !== 'end') setView('end');
@@ -981,6 +1489,61 @@ function showCard() {
     sfx.jingle('lose', 0.2);
   }
 }
+
+// the stars won beyond the level's best fly from the card to the total by the trail button, counting it up as they land
+function flyStars(from, to) {
+  // ?playtest: a background tab runs timers late and draws no frames, so there the stars land at once (playtest 2026-10-29:
+  // the total lagged a level behind the card)
+  if (playtest) {
+    $('starTotal').textContent = shownTotal += to - from;
+    return;
+  }
+  const card = camp;
+  for (let k = from; k < to; k++) {
+    setTimeout(() => {
+      const star = $('cardStars').children[k], pill = $('trail');
+      if (card !== camp || !star || !$('card').classList.contains('on')) return;
+      const a = star.getBoundingClientRect(), b = pill.getBoundingClientRect(), f = document.createElement('div');
+      f.className = 'flyer';
+      f.textContent = '★';
+      Object.assign(f.style, { left: `${a.left + a.width / 2}px`, top: `${a.top + a.height / 2}px` });
+      document.body.append(f);
+      requestAnimationFrame(() => (f.style.transform = `translate(${b.left + 18 - a.left - a.width / 2}px, ${b.top + b.height / 2 - a.top - a.height / 2}px) scale(0.45)`));
+      setTimeout(() => {
+        f.remove();
+        if (card !== camp) return;
+        $('starTotal').textContent = ++shownTotal;
+        pill.classList.remove('bump');
+        void pill.offsetWidth;
+        pill.classList.add('bump');
+        sfx.play('pick', 0.25, 1.8 + k * 0.15);
+      }, 650);
+    }, 1100 + k * 280);
+  }
+}
+
+// ---- the camp trail (the level map): each level's stars, the total, the camp's extras; a level to play ----
+function openTrail() {
+  sfx.wake();
+  const total = starTotal(), open = Math.max(reached, levelIndex);
+  $('mapTotal').textContent = total;
+  $('mapMax').textContent = LIST.length * 3;
+  $('settings').classList.remove('on');
+  $('map').classList.add('on');   // first, so the trail can measure its width
+  const pick = (k) => {
+    $('map').classList.remove('on');
+    if (k !== levelIndex || state !== 'play') busy(() => goTo(k));
+  };
+  drawTrail($('mapTrail'), { count: LIST.length, best, open, current: levelIndex, pick });
+  drawExtras($('mapExtras'), $('mapNext'), total);
+  // the button: the first open level without stars, else the one in play
+  const first = LIST.findIndex((_, k) => k <= open && !best[k]), play = first >= 0 ? first : levelIndex;
+  $('mapPlay').textContent = play === levelIndex && state === 'play' ? `Back to level ${play + 1}` : `Play level ${play + 1}`;
+  $('mapPlay').onclick = () => pick(play);
+}
+$('trail').onclick = openTrail;
+$('setTrail').onclick = openTrail;
+$('mapClose').onclick = () => $('map').classList.remove('on');
 
 // to another level: a new day; the camp keeps what it has (camp.js builds it from the levels before)
 function goTo(k) {
@@ -999,12 +1562,17 @@ function step(dt) {
   duskShown += (wantDusk - duskShown) * Math.min(1, dt * 1.6);
   weather.update(dt);
   world.setEvening(duskShown, weather.light());
+  setCrateGlow(clamp((duskShown - 0.45) * 0.5, 0, 0.25) + (1 - weather.light().sun) * 0.2);
+  if (note && t >= note.until) say('', 0);
   sfx.setEvening(duskShown, camp.fireSize());
   sfx.tick();
-  camp.update(dt, t, duskShown, state, moves);
+  camp.update(dt, t, duskShown, state, moves, new Set(L.blocks.filter((b, k) => pos[k]).map((b) => b.color)));
   fireflies(dt);
   waveFlags(board.flags, t);
+  if (thinking) emberThink(dt);
+  if (scanBand) scanBand.visible = !!thinking;
   board.tick(dt, t, drag ? L.blocks[drag.i].color : teach(dt));
+  fireworks(dt);
   // a gate's arch fades while a crate is in its lane by the opening (it would hide the crate on the near side)
   for (const a of board.arches) {
     const along = a.g.side === 'top' || a.g.side === 'bottom';
@@ -1035,6 +1603,7 @@ function step(dt) {
   if (u.to) {
     u.look.lerp(u.to.look, k);
     u.d += (u.to.d - u.d) * k;
+    u.dir.lerp(u.to.dir, k).normalize();
   }
   camera.position.copy(u.look).addScaledVector(u.dir, u.d);
   camera.position.x += Math.sin(t * 0.21) * 0.06;
@@ -1043,11 +1612,27 @@ function step(dt) {
 }
 
 let last = performance.now();
+// a phone (world.js LOW): the sun's shadows redrawn every other frame (every frame while a crate is in hand, so its shadow
+// keeps up), and if it still runs under about 36 frames a second over two seconds of play, one pixel per point from then on
+let shadowTick = 0;
+const pace = { n: 0, sum: 0 };
 function frame(now) {
-  const dt = Math.min((now - last) / 1000, 0.05);
+  const raw = now - last, dt = Math.min(raw / 1000, 0.05);
   last = now;
   if (document.visibilityState === 'visible' && !playtest) step(dt);
+  if (LOW) renderer.shadowMap.autoUpdate = !!drag || (++shadowTick & 1) === 0;
   renderer.render(scene, camera);
+  renderer.shadowMap.autoUpdate = true;
+  if (LOW && !playtest && renderer.getPixelRatio() > 1 && document.visibilityState === 'visible' && state === 'play' && raw < 200) {
+    pace.sum += raw;
+    if (++pace.n >= 120) {
+      if (pace.sum / pace.n > 28) {
+        renderer.setPixelRatio(1);
+        resize();
+      }
+      pace.n = pace.sum = 0;
+    }
+  }
   requestAnimationFrame(frame);
 }
 
@@ -1073,14 +1658,22 @@ if (playtest) {
     },
     // press at one point, slide to another over ms (the game plays meanwhile), let go; or drag([[x, y], [x, y], ...], ms) through
     // bends. The points after the first are where the crate's middle should go: the hand keeps its grip, as a player watching
-    // the crate would (a still picture between moves can't show a tester how far off the middle they took hold)
-    drag(x1, y1, x2, y2, ms = 600, kind = 'mouse') {
+    // the crate would (a still picture between moves can't show a tester how far off the middle they took hold). The checks
+    // use that; simulated players pass hold 'spot': the later points are where the cell they pressed goes (playtest
+    // 2026-10-29: testers aimed the cell they held, and the middle rule shifted long crates sideways by up to a cell and a half)
+    drag(x1, y1, x2, y2, ms = 600, kind = 'mouse', hold = 'middle') {
       let pts = Array.isArray(x1) ? x1 : [[x1, y1], [x2, y2]];
-      if (Array.isArray(x1)) [ms, kind] = [y1 ?? 600, x2 ?? 'mouse'];
+      if (Array.isArray(x1)) [ms, kind, hold] = [y1 ?? 600, x2 ?? 'mouse', y2 ?? 'middle'];
       const el = at(...pts[0]), n = Math.max(2, Math.round(Math.min(ms, 10000) / (1000 / HZ) / (pts.length - 1)));
       fire(el, 'pointerdown', ...pts[0], kind);
       if (drag) {
-        const b = L.blocks[drag.i], ox = drag.grabX - b.w / 2, oy = drag.grabY - b.h / 2;
+        // (a press on the line between two of the crate's cells, its middle say, is taken as it is: no cell to aim)
+        const b = L.blocks[drag.i], spot = (g, n) => {
+            const f = g - Math.min(Math.floor(g), n - 1);
+            return Math.abs(f - 0.5) < 0.35 ? f - 0.5 : 0;
+          },
+          ox = hold === 'spot' ? spot(drag.grabX, b.w) : drag.grabX - b.w / 2,
+          oy = hold === 'spot' ? spot(drag.grabY, b.h) : drag.grabY - b.h / 2;
         pts = pts.map((p, k) => {
           const g = k && gridAt({ clientX: p[0], clientY: p[1] });
           return g ? window.BD3.screen(g.x + ox, g.y + oy) : p;
@@ -1110,6 +1703,13 @@ if (playtest) {
     },
     async look(name) {
       renderer.render(scene, camera);
+      // the page's own animations and fades (the card, its stars popping) run on the screen's frames, which a background tab
+      // doesn't get: finished, as a player looking a moment later would see them
+      for (const a of document.getAnimations()) {
+        try {
+          a.finish();
+        } catch {}
+      }
       const r = canvas.getBoundingClientRect(), k = Math.min(1, 800 / Math.max(innerWidth, innerHeight));
       const out = document.createElement('canvas');
       out.width = Math.round(innerWidth * k);
@@ -1119,9 +1719,10 @@ if (playtest) {
       // the page's own layer (HUD, hint, cards) painted over it: backgrounds, icons and words where they sit on screen
       const paint = async (el) => {
         const cs = getComputedStyle(el), b = el.getBoundingClientRect();
-        if (cs.display === 'none' || cs.visibility === 'hidden' || !b.width) return;
-        const bg = cs.backgroundColor;
-        if (bg !== 'rgba(0, 0, 0, 0)') {
+        if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.05 || !b.width) return;
+        // a gradient (the trail's sheet and stops): its last colour stands for it
+        const bg = cs.backgroundColor !== 'rgba(0, 0, 0, 0)' ? cs.backgroundColor : (cs.backgroundImage.match(/rgba?\([^)]*\)/g) || []).pop();
+        if (bg && !/,\s*0\)$/.test(bg)) {
           g.fillStyle = bg;
           g.beginPath();
           g.roundRect(b.left * k, b.top * k, b.width * k, b.height * k, Math.min(parseFloat(cs.borderTopLeftRadius) || 0, b.height / 2) * k);
@@ -1130,7 +1731,13 @@ if (playtest) {
         if (el.tagName.toLowerCase() === 'svg' || el.tagName === 'IMG') {
           const img = el.tagName === 'IMG' ? el : new Image();
           if (img !== el) {
-            img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(el));
+            // drawn from a copy that carries the styles the page's CSS gives its parts (the trail's path)
+            const copy = el.cloneNode(true), to = [copy, ...copy.querySelectorAll('*')];
+            [el, ...el.querySelectorAll('*')].forEach((n, i) => {
+              const c = getComputedStyle(n);
+              for (const p of ['fill', 'stroke', 'stroke-width', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin', 'opacity']) to[i].style.setProperty(p, c.getPropertyValue(p));
+            });
+            img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(copy));
             await img.decode().catch(() => {});
           }
           g.drawImage(img, b.left * k, b.top * k, b.width * k, b.height * k);
@@ -1172,7 +1779,9 @@ if (playtest) {
         g.drawImage(img, hb.left * k, hb.top * k, hb.width * k, hb.height * k);
         g.globalAlpha = 1;
       }
-      for (const el of [$('hud'), $('hint'), $('pills'), $('howto'), $('intro'), $('card')]) await paint(el);
+      // in the page's own order: the settings, cards and the trail over the game's buttons
+      const z = (el) => Number(getComputedStyle(el).zIndex) || 0;
+      for (const el of [$('hud'), $('hint'), $('ember'), $('hintBtn'), $('pills'), $('card'), $('settings'), $('howto'), $('intro'), $('map'), $('rotate')].sort((a, b) => z(a) - z(b))) await paint(el);
       const res = await fetch(`http://127.0.0.1:5199/${name}`, { method: 'POST', body: out.toDataURL('image/jpeg', 0.75) }).catch(() => null);
       return res && res.ok ? `look: ${out.width}x${out.height}; page x = image x * ${(1 / k).toFixed(3)}, page y = image y * ${(1 / k).toFixed(3)}; played ${(played / 1000).toFixed(1)} s` : 'look failed';
     },
@@ -1180,7 +1789,23 @@ if (playtest) {
 }
 
 // film: fixed 1/30 s steps, each frame posted to the scratch saver (127.0.0.1:5199) as <name>_NNNN.jpg
+// covers and films wait until every texture in the scene has its picture (a cold cache: the rocks came out black, 2026-11-07)
+async function texturesReady(ms = 8000) {
+  const t0 = performance.now();
+  for (;;) {
+    let waiting = false;
+    scene.traverse((o) => {
+      for (const m of [].concat(o.material || [])) for (const k of ['map', 'emissiveMap', 'normalMap', 'roughnessMap']) {
+        const img = m[k]?.image;
+        if (m[k] && (!img || (img.complete === false) || (img.width === 0 && !img.data))) waiting = true;
+      }
+    });
+    if (!waiting || performance.now() - t0 > ms) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
 async function filmLoop() {
+  await texturesReady();
   const seconds = Number(q.get('secs')) || 40, name = q.get('name') || 'bd';
   const shot = (n) => fetch(`http://127.0.0.1:5199/${name}_${String(n).padStart(4, '0')}`, { method: 'POST', body: canvas.toDataURL('image/jpeg', 0.9) }).catch(() => {});
   let n = 0;
@@ -1207,6 +1832,7 @@ async function coverShot() {
   resize();
   camera.userData.d *= zoom;
   camera.userData.to.d *= zoom;
+  await texturesReady();
   for (let k = 0; k < 150; k++) step(1 / 30);
   // the title is the only text a cover may carry: no bedtime numbers
   scene.traverse((o) => o.isSprite && (o.visible = false));
@@ -1249,6 +1875,8 @@ async function coverShot() {
 window.BD3 = {
   state: () => ({ level: levelIndex + 1, moves, left: left(pos), state, lostTo, bedtime: nextBedtime(L, moves), dusk: duskShown, budget: L.budget, par: L.par, pos: pos.map((p) => p && p.slice()), weather: weather.kind() }),
   goTo: (k) => goTo(k - 1),
+  // a hidden test tab gets no resize notices until it draws (a phone turned in a check): what they would do
+  resize: () => (rotateCheck(), resize(), { portrait: campPortrait, rotate: $('rotate').classList.contains('on') }),
   levels: () => LIST.length,
   workers: () => camp.workers(),
   screen(x, y) {
@@ -1290,10 +1918,12 @@ if (playtest) {
 }
 let seenHowto = false;
 try {
-  seenHowto = localStorage.getItem('bd.howto') === '1';
+  seenHowto = store.getItem('bd.howto') === '1';
 } catch {}
 // the first level teaches by doing: no card first, a hand shows the first drag (teach(); the ? button still shows how to play)
 intro();
+// a returning player starts on the camp trail (a new one goes straight into level 1)
+if (reached > 0 && (!playtest || q.has('seed')) && !film && !cover && !watchUrl && !q.has('level') && !q.has('proto')) openTrail();
 if (film || cover) {
   for (const id of ['hud', 'pills', 'hint', 'intro', 'howto']) $(id).style.display = 'none';
   if (film) filmLoop();

@@ -6,6 +6,12 @@
 // A level: { w, h, walls: [[x, y]], gates: [{ side, at, len, color }], blocks: [{ x, y, w, h, color }] }, x to the right and y
 // down. A gate on 'top' spans cells at..at+len-1 of the top edge; 'left' and 'right' gates span rows. Positions: one [x, y] per
 // block, null once it has left.
+//
+// More for the 3D game's later levels (2026-10-28, a new thing every few levels): a crate may be `axis: 'x'` or 'y', heavy on
+// runners, sliding only that way (and leaving only through a gate at an end of that line); a crate may be padlocked,
+// `lock: k`, staying put while crate k (the one with its key) is still on the board; a gate may open late, `openAt`, its
+// crew back from the forest after that move. Long loads (four cells) and a pond in a corner (cells in `walls`, listed again
+// in `pond` for the look) need no rule of their own.
 
 export const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
@@ -36,9 +42,11 @@ export function reach(level, pos, i, from = pos[i], dark = null) {
   const b = level.blocks[i], occ = occupancy(level, pos, i, dark);
   const prev = new Map([[key(from[0], from[1]), -1]]);
   const cells = [from];
+  if (locked(level, pos, i)) return { cells, prev, has: (x, y) => prev.has(key(x, y)) };
   for (let q = 0; q < cells.length; q++) {
     const [x, y] = cells[q];
     for (const [dx, dy] of DIRS) {
+      if ((b.axis === 'x' && dy) || (b.axis === 'y' && dx)) continue;   // on runners: one way only
       const nx = x + dx, ny = y + dy, k = key(nx, ny);
       if (prev.has(k) || !fits(level, occ, b, nx, ny)) continue;
       prev.set(k, key(x, y));
@@ -55,15 +63,22 @@ export function pathTo(r, x, y) {
   return out.reverse();
 }
 
-// bedtime (Oleg's twist b, 2026-10-24): a gate may close for the night: its worker shuts it after move `closeAt` and goes to
-// bed. Until then, and on a gate without one, it is open.
-export const gateOpen = (g, moves = 0) => g.closeAt == null || moves < g.closeAt;
+// a padlocked crate, its key's crate still on the board
+export const locked = (level, pos, i) => level.blocks[i].lock != null && !!pos[level.blocks[i].lock];
 
-// the gate crate i leaves through from (x, y) with `moves` moves made, or null
-export function exitGate(level, i, x, y, moves = 0) {
+// bedtime (Oleg's twist b, 2026-10-24): a gate may close for the night: its worker shuts it after move `closeAt` and goes to
+// bed. A crew back late (2026-10-28): a gate may open only after move `openAt`. Otherwise it is open; and with no clock at
+// all (moves null: the daylight solver) every gate is.
+export const gateOpen = (g, moves = 0) => moves == null || ((g.openAt == null || moves >= g.openAt) && (g.closeAt == null || moves < g.closeAt));
+// open now or later: not yet shut for the night
+export const gateAlive = (g, moves = 0) => g.closeAt == null || moves < g.closeAt;
+
+// the gate crate i leaves through from (x, y) with `moves` moves made (null: no clock), or null
+export function exitGate(level, i, x, y, moves = null) {
   const b = level.blocks[i];
   for (const g of level.gates) {
     if (g.color !== b.color || !gateOpen(g, moves)) continue;
+    if ((b.axis === 'x' && (g.side === 'top' || g.side === 'bottom')) || (b.axis === 'y' && (g.side === 'left' || g.side === 'right'))) continue;
     if (g.side === 'top' && y === 0 && x >= g.at && x + b.w <= g.at + g.len) return g;
     if (g.side === 'bottom' && y + b.h === level.h && x >= g.at && x + b.w <= g.at + g.len) return g;
     if (g.side === 'left' && x === 0 && y >= g.at && y + b.h <= g.at + g.len) return g;
@@ -73,21 +88,28 @@ export function exitGate(level, i, x, y, moves = 0) {
 }
 
 // the first spot (nearest by drag) where crate i could leave, or null
-export function exitSpot(level, pos, i, dark = null, moves = 0) {
+export function exitSpot(level, pos, i, dark = null, moves = null) {
   if (!pos[i]) return null;
   for (const c of reach(level, pos, i, pos[i], dark).cells) if (exitGate(level, i, c[0], c[1], moves)) return c;
   return null;
 }
 
-// the crates still on the board whose colour has no gate open any more (after bedtime they can never leave)
+// the crates still on the board whose colour has no gate open now or later (after bedtime they can never leave)
 export function stranded(level, pos, moves) {
-  return level.blocks.map((b, i) => (pos[i] && !level.gates.some((g) => g.color === b.color && gateOpen(g, moves)) ? i : -1)).filter((i) => i >= 0);
+  return level.blocks.map((b, i) => (pos[i] && !level.gates.some((g) => g.color === b.color && gateAlive(g, moves)) ? i : -1)).filter((i) => i >= 0);
 }
 
 // the next gate to close after `moves` moves: { gate, at } (the soonest), or null
 export function nextBedtime(level, moves) {
   let best = null;
   for (const g of level.gates) if (g.closeAt != null && g.closeAt > moves && (!best || g.closeAt < best.at)) best = { gate: g, at: g.closeAt };
+  return best;
+}
+
+// the next late gate to open after `moves` moves: { gate, at }, or null
+export function nextOpening(level, moves) {
+  let best = null;
+  for (const g of level.gates) if (g.openAt != null && g.openAt > moves && (!best || g.openAt < best.at)) best = { gate: g, at: g.openAt };
   return best;
 }
 
