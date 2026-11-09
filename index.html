@@ -266,6 +266,33 @@
     #howto .go, #intro .go { display: block; margin: 14px auto 0; border: 0; border-radius: 14px; padding: 12px 26px; font-size: 16px; font-weight: 800; color: #fff; background: #e9973a; cursor: pointer; }
     .new { display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 999px; background: #ffd24a; color: #3a2a10; font-size: 11px; font-weight: 800; vertical-align: 1px; }
     #intro .camp { margin: 12px 0 4px; font-size: 14px; opacity: 0.9; }
+    /* a short screen (2026-11-09, playtest on the live CrazyGames page: its game frame on a laptop is 462 px tall, and How to
+       play ran off the top and bottom with its button out of reach): the cards never taller than the screen, scrolling inside
+       if they must, and a compact layout, the legend in two columns, so they fit whole */
+    #howto .box, #intro .box { box-sizing: border-box; max-height: 100%; overflow-y: auto; overscroll-behavior: contain; }
+    @media (max-height: 560px) {
+      #howto, #intro { padding: 8px; }
+      #howto .box, #intro .box { padding: 12px 18px; width: min(560px, 100%); }
+      #howto h2, #intro h2 { margin-bottom: 4px; font-size: 19px; }
+      #howto .step, #intro .step { margin: 6px 0; font-size: 14px; }
+      #howto .step svg, #intro .step svg { width: 40px; height: 40px; }
+      #howto .legend, #intro .legend { grid-template-columns: 1fr 1fr; gap: 6px 14px; margin: 8px 0 4px; padding-top: 8px; }
+      #howto .chip, #intro .chip { width: 28px; height: 28px; }
+      #howto .chip img, #intro .chip img { width: 20px; height: 20px; }
+      #howto .go, #intro .go { margin-top: 8px; padding: 10px 24px; }
+      #intro .camp { margin: 8px 0 2px; }
+    }
+    /* a short wide screen (the CrazyGames frame on a laptop): the level, the moves and the target on one line, so the board
+       gets the height (main.js frameFor keeps less room for the bar) */
+    @media (orientation: landscape) and (max-height: 560px) {
+      #hud .mid { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 14px; margin-top: 6px; }
+      #level { font-size: 18px; }
+      #moves, #best { margin-top: 0; font-size: 15px; }
+      #best { padding: 2px 10px 3px; }
+      /* (Ember's card narrower, clear of the bigger board's near corner) */
+      #ember { width: min(290px, 30vw); padding: 10px 12px 10px 10px; }
+      #ember .say { font-size: 15px; }
+    }
   </style>
 </head>
 <body>

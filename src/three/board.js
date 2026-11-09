@@ -342,6 +342,30 @@ export function buildBoard(scene, models, L, opts = {}) {
     marker.scale.set(w + SHADOW_M * 2, 1, h + SHADOW_M * 2);
     marker.position.set(ox + x + w / 2, 0.004, oz + y + h / 2);
   }
+  // where Ember's hinted move ends: the crate's footprint outlined in Ember's blue on the tiles, steady until the next move
+  // (2026-11-09, playtest on CrazyGames: the glowing copy's stop read a row off in a small frame once it had faded; Oleg: keep
+  // it marked). Drawn over what stands in front, so a crate nearer the camera can't hide it. aim([x, y, w, h]) or aim(null)
+  const aimMat = new THREE.MeshBasicMaterial({ color: 0x7fe6ff, transparent: true, opacity: 0, depthTest: false, depthWrite: false });
+  const aimFill = new THREE.MeshBasicMaterial({ color: 0x7fe6ff, transparent: true, opacity: 0, depthTest: false, depthWrite: false });
+  const aimer = new THREE.Group(), aimEdges = [0, 1, 2, 3].map(() => new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), aimMat));
+  const aimBase = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), aimFill);
+  aimBase.renderOrder = 6;
+  aimer.add(aimBase);
+  aimEdges.forEach((e) => ((e.renderOrder = 7), aimer.add(e)));
+  aimer.visible = false;
+  group.add(aimer);
+  let aimK = 0, aimOn = false;
+  function aim(at) {
+    aimOn = !!at;
+    if (!at) return;
+    const [x, y, w, h] = at, th = 0.1, inset = 0.07;
+    aimer.position.set(ox + x + w / 2, 0.03, oz + y + h / 2);
+    aimBase.scale.set(w - inset * 2, 1, h - inset * 2);
+    aimEdges[0].scale.set(w - inset * 2, 1, th), aimEdges[0].position.set(0, 0, -h / 2 + inset);
+    aimEdges[1].scale.set(w - inset * 2, 1, th), aimEdges[1].position.set(0, 0, h / 2 - inset);
+    aimEdges[2].scale.set(th, 1, h - inset * 2), aimEdges[2].position.set(-w / 2 + inset, 0, 0);
+    aimEdges[3].scale.set(th, 1, h - inset * 2), aimEdges[3].position.set(w / 2 - inset, 0, 0);
+  }
   // a heavy crate picked up (or pulled across its skids): arrows on the ground beyond both its ends, the way the skids let it
   // slide, blinking a few times and chasing outwards, then gone (2026-11-09, Oleg: the arrows fixed on the lid looked dull;
   // shown on the ground when it is picked up instead). way({ x, z, w, h, axis, age }) each frame, x and z the crate's middle.
@@ -401,6 +425,10 @@ export function buildBoard(scene, models, L, opts = {}) {
     markK += ((markOn ? 1 : 0) - markK) * Math.min(1, dt * 14);
     marker.visible = markK > 0.02;
     markMat.opacity = markK * 0.85;
+    aimK += ((aimOn ? 1 : 0) - aimK) * Math.min(1, dt * 10);
+    aimer.visible = aimK > 0.02;
+    aimMat.opacity = aimK * (0.75 + 0.2 * Math.sin(t * 4));
+    aimFill.opacity = aimK * 0.24;
     for (const [color, list] of Object.entries(lanes)) {
       for (const lane of list) {
         lane.k += ((color === lit ? 1 : 0) - lane.k) * Math.min(1, dt * 10);
@@ -416,7 +444,7 @@ export function buildBoard(scene, models, L, opts = {}) {
     }
   }
 
-  return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, mark, way, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
+  return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, mark, aim, way, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
 }
 
 // a soft shadow the shape of a w x h crate's footprint (in cells; a crate stands 0.06 in from its cells' edges), fading out

@@ -125,6 +125,8 @@ let campPortrait = false, L, board, camp, weather, crates, pos, moves, hist, sta
 let spotlit = false, spotAt = null, unlockUntil = 0;
 // a heavy crate picked up: which, and when (its way blinks on the ground for a moment: board.way)
 let blinkI = -1, blinkAt = 0;
+// Ember's hinted move that ends on the board, and the position it was given for (its end stays outlined while that holds)
+let aimed = null;
 // the largest board in the game: the camp's places and the forest's clearing are the same in every level
 const SIZE = { w: Math.max(...LIST.map((l) => l.w)), h: Math.max(...LIST.map((l) => l.h)) };
 
@@ -174,6 +176,7 @@ function load() {
   spotAt = null;
   unlockUntil = 0;
   blinkI = -1;
+  aimed = null;
   $('unlockNote').classList.remove('on');
   ember.close();
   firstMove = true;
@@ -520,9 +523,11 @@ function answer(r) {
   if (!r.move) return offWay(r.capped);
   const m = r.move, which = crateWords(m.i), more = r.par - moves, stars = starsFor(r.par), why = reasonFor(m);
   hinted = { m, at: moves, until: t + 14 };
+  // (and where it ends stays outlined until the board changes: board.aim)
+  aimed = m.exit ? null : { m, key: posKey(pos) };
   ember.answer({
     // (where it goes: the glowing copy glides there and waits; it read as a stop on the way, playtest 2026-11-07, Maya)
-    say: m.exit ? `Move ${which} out through its gate.` : `Move ${which} to where its glowing copy stops.`,
+    say: m.exit ? `Move ${which} out through its gate.` : `Move ${which} to the outlined spot, where its glowing copy stops.`,
     facts: `Best from here: ${more} more move${more === 1 ? '' : 's'} · ${stars === 3 ? '★★★ still possible' : stars === 2 ? 'now ★★ at best' : 'now ★ at best'}`,
     why: [why.text, headsUp(why.crew)].filter(Boolean).join(' '),
   });
@@ -1187,6 +1192,21 @@ $('howtoGo').onclick = () => {
 if (!q.has('review')) $('pills').style.display = 'none';
 // iPhones: sound starts (and comes back after a call or another app) only inside a touch's end or a click
 for (const type of ['touchend', 'click']) document.addEventListener(type, () => sfx.wake(), { passive: true });
+// the mouse wheel never scrolls the page round the game (2026-11-09, playtest on the live CrazyGames page: one flick over the
+// game scrolled their page 300 px and the board slid under its header); only a card or sheet that can still scroll that way
+// takes it
+addEventListener(
+  'wheel',
+  (e) => {
+    for (let el = e.target; el instanceof Element && el !== document.body; el = el.parentElement) {
+      if (el.scrollHeight > el.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(el).overflowY)) {
+        if (e.deltaY > 0 ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 0) return;
+      }
+    }
+    e.preventDefault();
+  },
+  { passive: false },
+);
 $('weather').onclick = () => {
   sfx.wake();
   weather.set(KINDS[(KINDS.indexOf(weather.kind()) + 1) % KINDS.length]);
@@ -1408,8 +1428,10 @@ function frameFor(w, h, kind) {
   // the end frame keeps the end card's own height free at the bottom (measured once it shows; a short screen gets a compact card)
   const box = $('card').classList.contains('on') && $('card').querySelector('.box').getBoundingClientRect();
   const cardRoom = box && box.height ? box.height + 22 : portrait ? 250 : 210;
-  // (a phone keeps room at the bottom for the hint line and its button)
-  const top = 1 - (2 * (portrait ? 120 : 95)) / h, bottom = -1 + (2 * (kind === 'end' ? cardRoom : portrait ? 110 : 40)) / h;
+  // (a phone keeps room at the bottom for the hint line and its button; a short wide screen, the CrazyGames frame on a laptop,
+  // has the bar on one line: slice.html)
+  const short = !portrait && h <= 560;
+  const top = 1 - (2 * (portrait ? 120 : short ? 56 : 95)) / h, bottom = -1 + (2 * (kind === 'end' ? cardRoom : portrait ? 110 : 40)) / h;
   // the distance at which a set of ground points fits between the margins, slid along the ground so they sit in the middle
   // of the space between the top bar and the bottom margin (the end card's room)
   const span = (look, d, corners) => {
@@ -1471,8 +1493,12 @@ function frameFor(w, h, kind) {
     }
     return { look, d: phone.d, dir };
   }
-  const near = fit(board);
-  return whole.d <= near.d * 1.35 ? { ...whole, dir } : { look: near.look, d: near.d * 1.35, dir };
+  // (a short wide screen, the CrazyGames frame on a laptop at 462 px: hardly zoomed out at all, the board as big as it goes,
+  // the camp running off the top and bottom; the board was 200 px there with 26 px cells, playtest 2026-11-09)
+  // (there, the board and a little over a cell round it, its gates' mouths, not the camp spots out in front)
+  const m = 1.35, near = short ? fit([new THREE.Vector3(-L.w / 2 - m, 0, -L.h / 2 - m), new THREE.Vector3(L.w / 2 + m, 0, L.h / 2 + m)]) : fit(board);
+  const out = 1.03 + 0.32 * clamp((h - 480) / 220, 0, 1);
+  return whole.d <= near.d * out ? { ...whole, dir } : { look: near.look, d: near.d * out, dir };
 }
 function fitCamera(w, h, glide = false) {
   const f = frameFor(w, h, view), u = camera.userData;
@@ -1805,6 +1831,8 @@ function step(dt) {
   if (thinking) emberThink(dt);
   if (scanBand) scanBand.visible = !!thinking;
   board.mark(drag && !watching() ? [...settleSpot(), L.blocks[drag.i].w, L.blocks[drag.i].h] : null);
+  if (aimed && (state !== 'play' || posKey(pos) !== aimed.key)) aimed = null;
+  board.aim(aimed && !watching() ? [aimed.m.to[0], aimed.m.to[1], L.blocks[aimed.m.i].w, L.blocks[aimed.m.i].h] : null);
   const wc = blinkI >= 0 && crates[blinkI] && !crates[blinkI].gone && !crates[blinkI].out ? crates[blinkI] : null;
   board.way(wc ? { x: wc.cur.x, z: wc.cur.z, w: wc.b.w, h: wc.b.h, axis: wc.b.axis === 'x' ? 'x' : 'z', age: t - blinkAt } : null);
   board.tick(dt, t, drag ? L.blocks[drag.i].color : teach(dt));
