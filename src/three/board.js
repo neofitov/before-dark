@@ -237,7 +237,9 @@ export function buildBoard(scene, models, L, opts = {}) {
       // its turn about the hinge: shut, along the opening; open, folded back the other way, swinging through pointing out of
       // the board (never across it)
       const outward = { top: Math.PI / 2, bottom: -Math.PI / 2, left: -Math.PI, right: 0 }[g.side];
-      const shut = (along ? 0 : -Math.PI / 2) + (high ? Math.PI : 0), open = 2 * outward - shut;
+      // (the half turn the short way: unwrapped, a bottom or left gate hinged on its far post swung 540 degrees, spinning a
+      // full turn through the board as it shut, Oleg 2026-11-07)
+      const shut = (along ? 0 : -Math.PI / 2) + (high ? Math.PI : 0), turnOut = Math.atan2(Math.sin(outward - shut), Math.cos(outward - shut)), open = shut + 2 * turnOut;
       const door = { pivot, shut, open, k: 0, len, out, hinge: new THREE.Vector3(hinge[0], GROUND, hinge[1]) };
       // where a worker stands to push it: by its free end, outside the board
       door.handle = (k) => {

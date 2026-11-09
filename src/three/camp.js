@@ -776,6 +776,14 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   function sleepy(w, dt) {
     const d = w.door, shut = w.bedtime || w.late, is = (...phases) => phases.includes(w.phase);
     const back = () => walkTo(w, w.home, 'backHome');
+    // with a crate waiting (on the mat, or set down on the way to the gate), straight to it from here, not home first and
+    // out again (Oleg, 2026-11-07: "when worker needs to close the gate makes double trip to the working place")
+    const resume = () => {
+      if (w.queue.length && !w.job) {
+        w.phase = 'wait';
+        w.path = [];
+      } else back();
+    };
     // the gate the wrong way round, and nobody on it yet
     if ((shut ? d.k < 1 : d.k > 0) && !is('toDoor', 'closing', 'toOpen', 'opening')) {
       if (is('putdown', 'build')) return false;
@@ -809,7 +817,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
         if (shut) sfx.gateShut();
         if (shut && w.late) walkTo(w, w.away, 'toAway');
         else if (shut && !w.job && !w.queue.length) walkTo(w, w.bed.side, 'toBed');
-        else back();
+        else resume();
       }
       return true;
     }
@@ -834,7 +842,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
         return true;
       }
       if (w.job || w.queue.length) {
-        if (is('toBed', 'asleep')) back();
+        if (is('toBed', 'asleep')) resume();
         else if (is('backHome')) {
           if (step(w, dt)) w.phase = 'wait';
         } else return false;
@@ -860,7 +868,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     }
     // before bedtime, the gate open: up and back to the gate
     if (is('toBed', 'asleep', 'toAway', 'away')) {
-      back();
+      resume();
       return true;
     }
     if (is('backHome')) {

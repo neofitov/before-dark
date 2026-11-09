@@ -914,6 +914,11 @@ function undo() {
     }
   });
   pos = before.map((p) => (p ? p.slice() : null));
+  // Ember's answer was for the board before the undo: it goes (a search under way finds the board changed and closes;
+  // playtest 2026-11-07, Maya: the card still said "goes to bed in 2 moves" after Undo, the gate said 4)
+  hinted = null;
+  emberUntil = 0;
+  if (!thinking) ember.close();
   sfx.play('pick', 0.4, 0.9);
   sfx.whoosh(false, 0.14);
   ui();
@@ -944,14 +949,34 @@ canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
   } catch {}
   grab(i, g.x, g.y);
+  pointerLook(e);
 });
+// a mouse over a crate it can take: an open hand, a closed one while dragging, "no" over a padlocked crate (Oleg,
+// 2026-11-07: "on desktop the cursor is not indicating that draggable option is available")
+function pointerLook(e) {
+  let look = '';
+  if (drag) look = 'grabbing';
+  else if (e.pointerType === 'mouse' && state === 'play' && !watching()) {
+    const g = gridAt(e);
+    let i = g ? blockAt(Math.floor(g.x), Math.floor(g.y)) : -1;
+    if (g && i < 0) i = crateNear(g.x, g.y);
+    if (i >= 0) look = locked(L, pos, i) ? 'not-allowed' : 'grab';
+  }
+  if (canvas.style.cursor !== look) canvas.style.cursor = look;
+}
 canvas.addEventListener('pointermove', (e) => {
+  pointerLook(e);
   if (!drag) return;
   const g = gridAt(e);
   if (g) steer(g.x, g.y);
 });
-canvas.addEventListener('pointerup', release);
-canvas.addEventListener('pointercancel', release);
+for (const type of ['pointerup', 'pointercancel']) {
+  canvas.addEventListener(type, (e) => {
+    release();
+    pointerLook(e);
+  });
+}
+canvas.addEventListener('pointerleave', () => !drag && (canvas.style.cursor = ''));
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 $('restart').onclick = () => {
   sfx.wake();
@@ -964,9 +989,7 @@ $('undo').onclick = () => {
 $('hintBtn').onclick = () => {
   sfx.wake();
   if (!showing) return hint();
-  showing = false;
-  bot = null;
-  busy(load);
+  skipCard();
 };
 // settings (playtest 2026-10-28: published games all have sound and music apart, and a panel): sound, music, how to play,
 // restart
@@ -1166,6 +1189,7 @@ let bot = null;
 function botStep(dt) {
   if (!watching() || state !== 'play') return;
   if (!bot) bot = { k: 0, wait: film ? 1.2 : 1.5, step: null };
+  if (bot.halt) return;
   if (bot.wait > 0) return void (bot.wait -= dt);
   const m = L.solution[bot.k];
   if (!m) return;
@@ -1347,7 +1371,7 @@ function ui() {
   bubble.set(note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : levelIndex === 0 && !q.has('proto') && moves === 0 ? 'Drag a crate out through the gate of its colour' : levelIndex === 0 && !q.has('proto') && moves > 0 && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : levelIndex === 0 && !q.has('proto') && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
   if (weather) $('weather').textContent = WEATHER_LABEL[weather.kind()];
   const hb = $('hintBtn');
-  hb.hidden = watchUrl || cover || q.has('proto') || state !== 'play';
+  hb.hidden = watchUrl || cover || q.has('proto') || state !== 'play' || $('card').classList.contains('on');
   hb.classList.toggle('skip', showing);
   hb.textContent = showing ? '⏭ Skip' : '✨ Ask Ember';
 }
@@ -1375,6 +1399,11 @@ const PIC = {
   heavy: '<rect x="2" y="8" width="50" height="38" rx="3" fill="#dcc38e"/><rect x="15" y="15" width="24" height="20" rx="3" fill="#f0c232"/><path d="M12 37h30" stroke="#2c2a2a" stroke-width="3.5" stroke-linecap="round"/><path d="M11 37l-2-4M43 37l2-4" stroke="#2c2a2a" stroke-width="3" stroke-linecap="round"/><path d="M4 25l7-6v12zM50 25l-7-6v12z" fill="#fff"/><path d="M27 18v14" stroke="#3c3a3a" stroke-width="1" opacity=".3"/>',
   pond: '<rect x="2" y="2" width="50" height="50" rx="3" fill="#dcc38e"/><path d="M2 5a3 3 0 0 1 3-3h25v14H16v14H2z" fill="#3f8fc8"/><circle cx="11" cy="11" r="4.5" fill="#4f9a3a"/><circle cx="22" cy="9" r="3" fill="#4f9a3a"/><path d="M5 26v-8M8 27v-6M27 13v-8" stroke="#6a9a3a" stroke-width="1.6"/><rect x="31" y="31" width="14" height="14" rx="2" fill="#e0543a"/>',
   padlock: '<rect x="3" y="18" width="30" height="24" rx="3" fill="#f0942e"/><path d="M3 30h30M18 18v24" stroke="#8a8c90" stroke-width="3.4"/><path d="M14 26v-3.5a4 4 0 0 1 8 0V26" stroke="#8a8c90" stroke-width="2.6" fill="none"/><rect x="11.5" y="25" width="13" height="11" rx="2" fill="#3b8fde"/><rect x="37" y="6" width="15" height="15" rx="2" fill="#3b8fde"/><circle cx="41.5" cy="13.5" r="2.6" stroke="#f2c440" stroke-width="1.8" fill="none"/><path d="M44 13.5h5.5M48 13.5v2.4" stroke="#f2c440" stroke-width="1.8"/>',
+  // round the rocks: a crate's one drag bending round a rock and a stump (2026-11-07: levels without a picture showed
+  // bedtime's, a "2" on a gate, whatever their rule; Maya)
+  rocks: '<rect x="2" y="2" width="50" height="50" rx="3" fill="#dcc38e"/><path d="M2 19h50M2 36h50M19 2v50M36 2v50" stroke="#b49a68" stroke-width="1"/><ellipse cx="28" cy="27" rx="7" ry="6" fill="#7d8088"/><ellipse cx="26" cy="25" rx="3" ry="2" fill="#a2a6ae"/><rect x="38" y="38" width="12" height="12" rx="2" fill="#8a5a32"/><ellipse cx="44" cy="42" rx="4" ry="2.5" fill="#c49a6a"/><rect x="5" y="40" width="12" height="9" rx="2" fill="#3b8fde"/><path d="M11 40V12h34" stroke="#3b8fde" stroke-width="2.4" fill="none" stroke-dasharray="3 2.4" stroke-linecap="round"/><path d="M43 8l5 4-5 4z" fill="#3b8fde"/>',
+  // every crew's gate: the board with a gate of each colour round it
+  gates: '<rect x="8" y="8" width="38" height="38" rx="3" fill="#dcc38e"/><path d="M8 21h38M8 33h38M21 8v38M33 8v38" stroke="#b49a68" stroke-width="1"/><rect x="12" y="3" width="10" height="5" rx="1" fill="#e0543a"/><rect x="30" y="3" width="10" height="5" rx="1" fill="#f0942e"/><rect x="46" y="14" width="5" height="10" rx="1" fill="#4fa83a"/><rect x="46" y="30" width="5" height="10" rx="1" fill="#3b8fde"/><rect x="14" y="46" width="10" height="5" rx="1" fill="#9a5ad0"/><rect x="3" y="26" width="5" height="10" rx="1" fill="#f0c232"/><rect x="23" y="23" width="9" height="9" rx="2" fill="#9a5ad0"/>',
   late: '<path d="M38 4l-9 16h18z M38 12l-11 18h22z" fill="#3e7a34"/><rect x="36.5" y="29" width="3" height="5" fill="#6a4628"/><rect x="2" y="36" width="50" height="6" rx="2" fill="#9a6a3c"/><g fill="#5a3a22"><rect x="8" y="26" width="3" height="16"/><rect x="13" y="26" width="3" height="16"/><rect x="18" y="26" width="3" height="16"/></g><rect x="6" y="25" width="17" height="3" fill="#f05a3c"/><circle cx="45" cy="47" r="3" fill="#ffd2a0"/><path d="M30 48h-8m3-3-3 3 3 3" stroke="#3e9e38" stroke-width="2.2" fill="none" stroke-linecap="round"/><circle cx="14" cy="15" r="6.5" fill="#e2f6d2" stroke="#3a2c4a" stroke-width="1.2"/><text x="14" y="18" font-size="8.5" font-weight="800" fill="#2a2238" text-anchor="middle" font-family="system-ui">4</text>',
 };
 let bedtimePic = null;
@@ -1382,23 +1411,23 @@ const INTRO = [
   null,
   { title: 'Level 2: bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
   { title: 'Level 3: two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
-  { title: 'Level 4: round the rocks', rule: '<b>Rocks and stumps never move.</b> Drag a crate round them in one go.' },
+  { title: 'Level 4: round the rocks', rule: '<b>Rocks and stumps never move.</b> Drag a crate round them in one go.', pic: 'rocks' },
   { title: 'Level 5: three early crews', rule: '<b>Three crews go to bed early.</b> Watch the numbers on the gates.' },
-  { title: 'Level 6: tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.' },
-  { title: 'Level 7: the whole camp', rule: '<b>Every crew is here:</b> all six gates.' },
+  { title: 'Level 6: tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.', pic: 'rocks' },
+  { title: 'Level 7: the whole camp', rule: '<b>Every crew is here:</b> all six gates.', pic: 'gates' },
   { title: 'Level 8: long loads', rule: '<b>Long loads</b> are four cells long: they turn no corners in a tight spot.', pic: 'long' },
-  { title: 'Level 9: long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.' },
+  { title: 'Level 9: long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.', pic: 'long' },
   { title: 'Level 10: heavy crates', rule: '<b>Heavy crates run on skids:</b> only the way the arrows point.', pic: 'heavy' },
-  { title: 'Level 11: heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.' },
+  { title: 'Level 11: heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.', pic: 'heavy' },
   { title: 'Level 12: the pond', rule: '<b>A pond fills a corner.</b> Nothing crosses the water.', pic: 'pond' },
-  { title: 'Level 13: by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.' },
+  { title: 'Level 13: by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.', pic: 'pond' },
   { title: 'Level 14: the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out.', pic: 'padlock' },
-  { title: 'Level 15: keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?' },
+  { title: 'Level 15: keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?', pic: 'padlock' },
   { title: 'Level 16: two padlocks', rule: '<b>Two padlocks:</b> the colour on each lock is the crate with its key.', pic: 'padlock' },
   { title: 'Level 17: back late', rule: '<b>A crew is out in the forest.</b> Their gate opens when they are back.', pic: 'late' },
-  { title: 'Level 18: late and early', rule: '<b>One crew back late, one to bed early.</b> Time it.' },
-  { title: 'Level 19: a long evening', rule: '<b>Pond, padlock, skids, a late crew</b> and an early one.' },
-  { title: 'Level 20: the last night', rule: '<b>Everything at once</b>, and every crew in camp.' },
+  { title: 'Level 18: late and early', rule: '<b>One crew back late, one to bed early.</b> Time it.', pic: 'late' },
+  { title: 'Level 19: a long evening', rule: '<b>Pond, padlock, skids, a late crew</b> and an early one.', pic: 'gates' },
+  { title: 'Level 20: the last night', rule: '<b>Everything at once</b>, and every crew in camp.', pic: 'gates' },
 ];
 function intro() {
   $('intro').classList.remove('on');   // another level's, left under the camp trail
@@ -1425,18 +1454,36 @@ $('introGo').onclick = () => {
   } catch {}
 };
 
+function button(text, go, alt) {
+  const b = document.createElement('button');
+  b.textContent = text;
+  if (alt) b.className = 'alt';
+  b.onclick = () => {
+    sfx.wake();
+    go();
+  };
+  $('cardBtns').append(b);
+}
+// "Show me" skipped: the solver stops where it is and the card that ends it comes at once, to try it or go on (playtest
+// 2026-11-07, Maya: Skip threw her back into the level she had won, with no way on but the trail)
+function skipCard() {
+  const last = levelIndex >= LIST.length - 1;
+  if (drag) release();
+  bot = { halt: true };
+  $('cardBtns').innerHTML = '';
+  $('cardTitle').textContent = `The way in ${L.par} moves`;
+  $('cardStars').textContent = '';
+  $('cardText').textContent = 'Your turn?';
+  $('cardExtra').innerHTML = '';
+  button('Try it', () => ((showing = false), busy(load)));
+  if (!last) button('Next level', () => ((showing = false), busy(() => goTo(levelIndex + 1))), true);
+  $('card').classList.remove('won');
+  $('card').classList.add('on');
+  if (view !== 'end') setView('end');
+  ui();
+}
 function showCard() {
   const won = state === 'won', stars = starsFor(moves), last = levelIndex >= LIST.length - 1;
-  const button = (text, go, alt) => {
-    const b = document.createElement('button');
-    b.textContent = text;
-    if (alt) b.className = 'alt';
-    b.onclick = () => {
-      sfx.wake();
-      go();
-    };
-    $('cardBtns').append(b);
-  };
   $('cardBtns').innerHTML = '';
   if (won) {
     $('cardTitle').textContent = last ? 'The camp is ready for the night' : 'Camp ready before dark';
@@ -1450,7 +1497,12 @@ function showCard() {
       if (!last) button('Next level', () => ((showing = false), busy(() => goTo(levelIndex + 1))), true);
     } else {
       $('cardText').textContent = `${moves} moves (target ${L.par})${last && !q.has('proto') ? '. More levels soon!' : ''}`;
-      if (!last) button('Next level', () => busy(() => goTo(levelIndex + 1)));
+      // a level played again from the trail: on to where the player had got to, not the level after this one (playtest
+      // 2026-11-07, Maya: after replaying level 1, "Next level" took her to level 2 when she was on level 12)
+      const furthest = Math.min(reached, LIST.length - 1), ahead = !q.has('proto') && furthest > levelIndex + 1;
+      // (instead of "Next level": three buttons do not fit a phone's card; the trail, behind the star, has every level)
+      if (ahead) button(`Back to level ${furthest + 1}`, () => busy(() => goTo(furthest)));
+      else if (!last) button('Next level', () => busy(() => goTo(levelIndex + 1)));
       button('Play again', () => busy(load), !last);
       if (stars < 3) button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
       if (last) button('Camp trail', openTrail, true);
@@ -1710,7 +1762,8 @@ if (playtest) {
           a.finish();
         } catch {}
       }
-      const r = canvas.getBoundingClientRect(), k = Math.min(1, 800 / Math.max(innerWidth, innerHeight));
+      // (?lookmax=1280: bigger pictures, for store screenshots)
+      const r = canvas.getBoundingClientRect(), k = Math.min(1, (Number(q.get('lookmax')) || 800) / Math.max(innerWidth, innerHeight));
       const out = document.createElement('canvas');
       out.width = Math.round(innerWidth * k);
       out.height = Math.round(innerHeight * k);
