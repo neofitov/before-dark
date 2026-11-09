@@ -185,6 +185,13 @@
     #cardExtra .unlock { display: inline-flex; align-items: center; gap: 6px; padding: 3px 13px 3px 5px; border-radius: 999px; background: #ffd24a;
       color: #3a2a10; animation: starPop 0.5s 1.3s cubic-bezier(.2, 1.8, .4, 1) both; }
     @media (max-height: 560px) { #cardExtra { margin: -4px 0 8px; font-size: 13px; } }
+    /* a newly earned extra, named while the camera looks at it, before the win card (playtest 2026-11-07) */
+    #unlockNote { position: fixed; left: 50%; top: calc(max(12px, env(safe-area-inset-top)) + 104px); z-index: 18; display: flex; align-items: center; gap: 8px;
+      padding: 5px 18px 5px 7px; border-radius: 999px; background: #ffd24a; color: #3a2a10; font-size: 18px; font-weight: 700; white-space: nowrap;
+      box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35); pointer-events: none; opacity: 0; transform: translate(-50%, -12px) scale(0.9);
+      transition: opacity 0.25s, transform 0.35s cubic-bezier(.2, 1.6, .4, 1); }
+    #unlockNote.on { opacity: 1; transform: translate(-50%, 0); }
+    @media (max-width: 420px) { #unlockNote { font-size: 15px; } }
     /* the camp trail */
     #map { position: fixed; inset: 0; z-index: 36; display: none; align-items: center; justify-content: center; padding: 12px;
       background: rgba(6, 14, 8, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
@@ -301,6 +308,7 @@
   </div></div>
   <!-- the first level's teaching hand (main.js teach()) -->
   <div id="hand"><svg viewBox="0 0 64 72" width="56" height="63"><path d="M22 8c0-4 7-4 7 0v24c0-3 7-3 7 0v4c0-3 7-3 7 0v4c0-3 7-3 7 0v14c0 9-6 14-15 14h-6c-6 0-9-3-12-8l-9-15c-2-4 3-7 6-4l8 9V8z" fill="#fff" stroke="#2a2235" stroke-width="3.5" stroke-linejoin="round"/></svg></div>
+  <div id="unlockNote"></div>
   <div id="card"><div class="box"><h2 id="cardTitle"></h2><div class="stars" id="cardStars"></div><p id="cardText"></p><div id="cardExtra"></div><div class="row" id="cardBtns"></div></div></div>
   <div id="settings"><div class="box">
     <h2>Settings</h2>

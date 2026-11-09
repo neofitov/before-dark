@@ -612,13 +612,13 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       w.pos.copy(w.away);
       w.awayAt = w.away.clone();
       w.phase = 'away';
-      w.tag = sleepTag(true);
+      w.tag = sleepTag(true, color);
       scene.add(w.tag);
     }
     if (g && board.doors?.[color]) {
       w.door = board.doors[color];
       w.closeAt = g.closeAt;
-      w.tag = sleepTag();
+      w.tag = sleepTag(false, color);
       scene.add(w.tag);
       w.bed = beds[Object.values(workers).filter((x) => x.door).length % beds.length];
       // a bedroll for while there is no bed at that place yet, and the crew's own blanket
@@ -1123,8 +1123,10 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       // (none once the crew's crates are all out: playtest 2026-10-29, a "1" left on a gate looked like a job still to do)
       w.tag.visible = (w.openAt != null ? w.late : !w.bedtime) && state === 'play' && (!onBoard || onBoard.has(w.color));
       // (a gate on the far side: up over its banner, board.js, so the number never covers the gate's sign)
-      const far = sp && sp.out.z < -0.5;
-      if (sp) w.tag.position.copy(sp.gateMid).addScaledVector(sp.out, far ? 1.0 : 0.55).setY(GROUND + (far ? 2.3 : 1.55));
+      // (and on the near side further out, and lower: standing up there it reaches up the screen over the last row; the tags
+      // grew in the playtest of 2026-11-09, and a gate mark must never cover a crate)
+      const far = sp && sp.out.z < -0.5, near = sp && sp.out.z > 0.5;
+      if (sp) w.tag.position.copy(sp.gateMid).addScaledVector(sp.out, far ? 1.0 : near ? 0.95 : 0.55).setY(GROUND + (far ? 2.3 : near ? 1.2 : 1.55));
       else w.tag.position.set(w.pos.x, GROUND + 1.35, w.pos.z);
       w.tag.userData.set(w.openAt != null ? w.openAt - moves : w.closeAt - moves);
     }
@@ -1164,6 +1166,9 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   return {
     sites, arrived, cancel, update, extras,
     // for checks: each worker's phase, job and bedtime
+    // the countdown tags on show, for a tap on one to be explained (main.js): its crew, whether it is back late or to bed early,
+    // the moves it shows, and where it is
+    tags: () => Object.entries(workers).filter(([, w]) => w.tag && w.tag.visible).map(([color, w]) => ({ color, late: w.openAt != null, n: w.tag.userData.shown, at: w.tag.position.clone() })),
     workers: () => Object.fromEntries(Object.entries(workers).map(([c, w]) => [c, { phase: w.phase, done: w.done, job: !!w.job, queue: w.queue.length, bedtime: w.bedtime, door: w.door && +w.door.k.toFixed(2), got: w.site.got, total: w.site.total, pos: [+w.pos.x.toFixed(2), +w.pos.z.toFixed(2)], path: w.path.length, to: w.path.length ? [+w.path[w.path.length - 1].x.toFixed(2), +w.path[w.path.length - 1].z.toFixed(2)] : null }])),
     busy: () => Object.values(workers).some((w) => !w.done || w.queue.length),
     cheer: () => Object.values(workers).forEach((w) => (w.cheer = 2.4)),
@@ -1217,25 +1222,36 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
 // the fire grows with its stages (lit at the third), a little more with each extra load
 const fireSize = (stage) => [0, 0, 0, 0.35, 0.5, 0.75, 1][Math.min(stage, 6)] + Math.max(0, stage - 6) * 0.05;
 
-// the tag over a crew that turns in early: the moves left, with a sleepy z; or (late) the moves till a crew is back, green,
-// with an arrow coming home
-function sleepTag(late = false) {
+// the tag over a crew that turns in early: the moves left, with a moon; or (late) the moves till a crew is back, green, with
+// a pine tree (they are out in the forest). The marks were a small "z" and "↩" until the playtest of 2026-11-09 (Dan, level
+// 19: both tags looked alike, "which crew is late and which is early?")
+function sleepTag(late = false, color = null) {
   const cv = document.createElement('canvas');
   cv.width = cv.height = 128;
   const tex = new THREE.CanvasTexture(cv), sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
   sprite.renderOrder = 5;
-  sprite.scale.setScalar(0.85);
+  // (0.85 until 2026-11-09: about 30 px across on a laptop, its marks too small to read; Ruth)
+  sprite.scale.setScalar(1.15);
   let shown = null;
   sprite.userData.set = (n) => {
     if (n === shown) return;
-    shown = n;
+    shown = sprite.userData.shown = n;
     const g = cv.getContext('2d');
     g.clearRect(0, 0, 128, 128);
     g.fillStyle = late ? '#e2f6d2' : n <= 1 ? '#d8452e' : '#fff6e2';
     g.beginPath();
     g.arc(60, 68, 50, 0, Math.PI * 2);
     g.fill();
-    g.lineWidth = 6;
+    // ringed in its crew's colour, so a number reads as its gate's with two or three of them about (playtest 2026-11-09,
+    // Maya, levels 5 and 13)
+    if (color) {
+      g.lineWidth = 12;
+      g.strokeStyle = SUPPLY_FLAG[color];
+      g.stroke();
+      g.beginPath();
+      g.arc(60, 68, 56, 0, Math.PI * 2);
+    }
+    g.lineWidth = 5;
     g.strokeStyle = '#3a2c4a';
     g.stroke();
     g.fillStyle = !late && n <= 1 ? '#fff' : '#2a2238';
@@ -1243,9 +1259,33 @@ function sleepTag(late = false) {
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     g.fillText(String(n), 60, 72);
-    g.fillStyle = late ? '#3e9e38' : '#5a7ad8';
-    g.font = 'bold 34px system-ui, sans-serif';
-    g.fillText(late ? '↩' : 'z', 108, 22);
+    // the mark: a badge at the top right
+    g.beginPath();
+    g.arc(102, 26, 23, 0, Math.PI * 2);
+    g.fillStyle = late ? '#2f7a2c' : '#2c3466';
+    g.fill();
+    g.lineWidth = 4;
+    g.strokeStyle = '#3a2c4a';
+    g.stroke();
+    if (late) {
+      // a pine: two tiers and a trunk
+      g.fillStyle = '#e9ffd8';
+      g.beginPath();
+      g.moveTo(102, 9), g.lineTo(90, 27), g.lineTo(114, 27), g.closePath();
+      g.moveTo(102, 17), g.lineTo(87, 37), g.lineTo(117, 37), g.closePath();
+      g.fill();
+      g.fillRect(99, 37, 6, 6);
+    } else {
+      // a crescent moon
+      g.fillStyle = '#ffd84a';
+      g.beginPath();
+      g.arc(100, 26, 14, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#2c3466';
+      g.beginPath();
+      g.arc(107, 21, 12, 0, Math.PI * 2);
+      g.fill();
+    }
     tex.needsUpdate = true;
   };
   return sprite;

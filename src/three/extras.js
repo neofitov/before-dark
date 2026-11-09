@@ -366,6 +366,9 @@ export function makeExtras(scene, models, board, size, portrait, ids, fx) {
   ids.forEach(build);
   return {
     has: (id) => !!built[id],
+    // a ground extra's place ({ x, z, w, d }), for the camera to go and look at it when it is earned; null for the ones on the
+    // board (the lanterns, the bunting)
+    where: (id) => spots[id] || null,
     // a newly earned one appears, after `delay` s, with a pop and a shower of sparks (the win card names it). It is built
     // at once, so the camera's end frame takes it in
     reveal(id, delay = 0) {

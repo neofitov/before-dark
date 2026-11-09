@@ -302,9 +302,11 @@ function flock(scene, size) {
       if (!at) {
         wait -= dt;
         if (wait > 0 || dusk > 0.7) return;
-        const a = Math.random() * Math.PI * 2, a2 = a + Math.PI + (Math.random() - 0.5) * 1.2;
-        at = new THREE.Vector3(Math.cos(a) * R, GROUND + 3.5 + Math.random() * 1.5, Math.sin(a) * R * 0.8 - 2);
-        dir = new THREE.Vector3(Math.cos(a2) * R, at.y, Math.sin(a2) * R * 0.8 - 2).sub(at);
+        // across the back of the glade, side to side, never over the board (playtest 2026-11-07: dark shapes over the crates
+        // for a moment, read as bats; Ruth, Dan)
+        const s = Math.random() < 0.5 ? 1 : -1, back = -(size.h / 2 + 7 + Math.random() * 4);
+        at = new THREE.Vector3(-s * R, GROUND + 3.5 + Math.random() * 1.5, back);
+        dir = new THREE.Vector3(s * R, at.y, back - 2 + Math.random() * 4).sub(at);
         u = 0;
         for (const b of birds) (b.root.visible = true), (b.root.rotation.y = Math.atan2(dir.x, dir.z));
       }

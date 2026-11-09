@@ -15,7 +15,7 @@ import { CAMPAIGN } from './campaign.js';
 import { reach, pathTo, exitGate, exitSpot, startPos, left, gateOpen, stranded, nextBedtime, locked } from '../slide/model.js';
 import { darkMask, lostCrates } from '../slide/dark.js';
 import { makeWorld, plantForest, natureMaterial, LOW } from './world.js';
-import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, SUPPLY, GROUND } from './board.js';
+import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, wallModel, SUPPLY, GROUND } from './board.js';
 import { makeParticles, dustPuff, unpackBurst } from './fx.js';
 import { makeCamp, campKeepOut, campDepth } from './camp.js';
 import { EXTRAS, earned } from './extras.js';
@@ -121,6 +121,10 @@ async function loadModels() {
 }
 
 let campPortrait = false, L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
+// a win that earned the camp something new: the camera has been to it (spotlight), and where it is (null: on the board)
+let spotlit = false, spotAt = null, unlockUntil = 0;
+// a heavy crate picked up: which, and when (its way blinks on the ground for a moment: board.way)
+let blinkI = -1, blinkAt = 0;
 // the largest board in the game: the camp's places and the forest's clearing are the same in every level
 const SIZE = { w: Math.max(...LIST.map((l) => l.w)), h: Math.max(...LIST.map((l) => l.h)) };
 
@@ -163,8 +167,14 @@ function load() {
   campPortrait = vh > vw;
   camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, story(levelIndex));
   lostTo = null;
-  hinted = note = thinking = null;
+  hinted = note = thinking = warned = null;
   hintAsk++;   // a search still running is for the last try
+  lookAsk++;
+  spotlit = false;
+  spotAt = null;
+  unlockUntil = 0;
+  blinkI = -1;
+  $('unlockNote').classList.remove('on');
   ember.close();
   firstMove = true;
   duskShown = 0;
@@ -352,6 +362,7 @@ function grab(i, gx, gy) {
   drag = { i, from: pos[i].slice(), before: pos.map((p) => (p ? p.slice() : null)), grabX: gx - pos[i][0], grabY: gy - pos[i][1], fx: pos[i][0], fy: pos[i][1], tx: pos[i][0], ty: pos[i][1], occ: occupancy(i), cell: pos[i].join() };
   crates[i].liftV += 2;
   sfx.play('pick', 0.5);
+  if (L.blocks[i].axis) (blinkI = i), (blinkAt = t);
   // the hand (a hint, level 1's lesson) is done with once a crate is in hand
   $('hand').style.opacity = 0;
   hinted = null;
@@ -492,12 +503,26 @@ function hint() {
 }
 const crewName = (c, lower = false) => (lower ? CREW_NAME[c].replace(/^The/, 'the') : CREW_NAME[c]);
 const movesWord = (n) => (n === 1 ? 'one move' : `${n} moves`);
+// a crate in words: "the water crate", or with two or more of its colour on the board, which one, as the screen shows them
+// (playtest 2026-11-07, Maya: "Move the water crate" with two water crates on the board)
+function crateWords(i) {
+  const b = L.blocks[i], name = SUPPLY[b.color].name, twins = pos.map((p, j) => (p && j !== i && L.blocks[j].color === b.color ? j : -1)).filter((j) => j >= 0);
+  if (!twins.length) return `the ${name} crate`;
+  const mid = (j) => [pos[j][0] + L.blocks[j].w / 2, pos[j][1] + L.blocks[j].h / 2], [x, y] = mid(i);
+  if (twins.length === 1) {
+    const [ox, oy] = mid(twins[0]), dx = x - ox, dy = y - oy;
+    return `the ${Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'top' : 'bottom'} ${name} crate`;
+  }
+  const col = x < L.w / 3 ? 'left' : x > (2 * L.w) / 3 ? 'right' : '', row = y < L.h / 3 ? 'top' : y > (2 * L.h) / 3 ? 'bottom' : '';
+  return `the ${name} crate ${row || col ? `at the ${[row, col].filter(Boolean).join(' ')}` : 'in the middle'}`;
+}
 function answer(r) {
   if (!r.move) return offWay(r.capped);
-  const m = r.move, name = SUPPLY[L.blocks[m.i].color].name, more = r.par - moves, stars = starsFor(r.par), why = reasonFor(m);
+  const m = r.move, which = crateWords(m.i), more = r.par - moves, stars = starsFor(r.par), why = reasonFor(m);
   hinted = { m, at: moves, until: t + 14 };
   ember.answer({
-    say: m.exit ? `Move the ${name} crate out through its gate.` : `Move the ${name} crate where the glow shows.`,
+    // (where it goes: the glowing copy glides there and waits; it read as a stop on the way, playtest 2026-11-07, Maya)
+    say: m.exit ? `Move ${which} out through its gate.` : `Move ${which} to where its glowing copy stops.`,
     facts: `Best from here: ${more} more move${more === 1 ? '' : 's'} · ${stars === 3 ? '★★★ still possible' : stars === 2 ? 'now ★★ at best' : 'now ★ at best'}`,
     why: [why.text, headsUp(why.crew)].filter(Boolean).join(' '),
   });
@@ -526,9 +551,7 @@ function headsUp(said) {
 }
 // no way on from here in the moves left (or none found in time): back to the last point on the level's own way
 function offWay(unsure) {
-  let k = moves - 1;
-  while (k > 0 && posKey(hist[k]) !== wayAt(k)) k--;
-  const back = moves - Math.max(k, 0), restart = back === moves && back > 3, el = restart ? $('restart') : $('undo');
+  const { back, restart, el } = backToWay();
   el.classList.remove('pulse');
   void el.offsetWidth;
   el.classList.add('pulse');
@@ -539,6 +562,56 @@ function offWay(unsure) {
     facts: restart ? 'Restart to try again.' : `Undo ${movesWord(back)} to get back on track.`,
     why: headsUp(null),
   });
+  sfx.chime([523, 440], 0.05, 0.6);
+}
+// how far back the last point on the level's own way is (a sure way on from there), and the button that gets there
+function backToWay() {
+  let k = moves - 1;
+  while (k > 0 && posKey(hist[k]) !== wayAt(k)) k--;
+  const back = moves - Math.max(k, 0), restart = back === moves && back > 3;
+  return { back, restart, el: restart ? $('restart') : $('undo') };
+}
+// ---- a look ahead after every move (playtest 2026-11-07, Jonas and Maya: a crew could no longer make bedtime, and they
+// found out moves later, when its gate shut): a crew with more crates on the board than moves to its bedtime is told at once;
+// otherwise, off the level's own way, the solver looks for any way to finish in the moves left (in a worker, a second or two)
+// and, finding none, Ember says so unasked and Undo pulses. A search cut short by its time says nothing ----
+let lookWorker = null, lookAsk = 0, lookBusy = false, warned = null;
+function lookAhead() {
+  const ask = ++lookAsk, at = posKey(pos) + '|' + moves;
+  if (state !== 'play' || watching() || q.has('proto') || warned === at) return;
+  for (const color of new Set(L.gates.filter((g) => g.closeAt > moves).map((g) => g.color))) {
+    const gates = L.gates.filter((g) => g.color === color);
+    if (gates.some((g) => g.closeAt == null)) continue;
+    const n = pos.filter((p, j) => p && L.blocks[j].color === color).length;
+    if (n > Math.max(...gates.map((g) => g.closeAt)) - moves) return stuck(at, color);
+  }
+  if (posKey(pos) === wayAt(moves)) return;
+  if (lookBusy) {
+    lookWorker.terminate();
+    lookWorker = null;
+  }
+  try {
+    lookWorker ||= new Worker(new URL('./hint-worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    return;
+  }
+  lookBusy = true;
+  lookWorker.onmessage = ({ data }) => {
+    if (data.progress != null || data.ask !== lookAsk) return;
+    lookBusy = false;
+    if (!data.move && !data.capped && at === posKey(pos) + '|' + moves && state === 'play' && !drag) stuck(at, null);
+  };
+  lookWorker.postMessage({ ask, level: L, pos, moves, aside: L.budget - moves - left(pos), secs: LOW ? 1.2 : 2 });
+}
+function stuck(at, color) {
+  warned = at;
+  const { back, restart, el } = backToWay();
+  el.classList.remove('pulse');
+  void el.offsetWidth;
+  el.classList.add('pulse');
+  const fix = restart ? 'Restart to try again.' : back === 1 ? 'Undo takes the last move back.' : `Undo ${movesWord(back)} to get back on track.`;
+  say(color ? `${crewName(color)} can’t get every ${SUPPLY[color].name} crate out before bed now. ${fix}` : `No way to finish from here now. ${fix}`, 8);
+  note.warn = true;
   sfx.chime([523, 440], 0.05, 0.6);
 }
 // thinking, seen: sparks trace a move it could make, again and again; a band of light sweeps the board; soft blips
@@ -599,22 +672,28 @@ function ghost(dt, m) {
     scene.add(ghostObj);
     ghostOf = m;
     ghostT = 0;
+    crates[m.i].squashV += 4.5;
   }
   const pts = pathTo(reach(L, pos, m.i, pos[m.i], darkMask(L, moves)), m.to[0], m.to[1]).map(([x, y]) => cellCenter(m.i, x, y));
   if (m.exit) {
     const o = OUT[exitGate(L, m.i, m.to[0], m.to[1], moves).side];
     pts.push(pts[pts.length - 1].clone().add(new THREE.Vector3(o[0] * 1.3, 0, o[1] * 1.3)));
   }
-  ghostT = (ghostT + dt) % 2.8;
+  // it glides (0.35-1.85 s), then waits where the move ends for a second before it fades (it used to fade as it arrived: the
+  // spot read as a stop on the way, playtest 2026-11-07, Maya); the real crate stretches up at the start (no thud, unlike a
+  // hop), so it is plain which one
+  const was = ghostT;
+  ghostT = (ghostT + dt) % 3.4;
+  if (ghostT < was) crates[m.i].squashV += 4.5;
   const lens = pts.slice(1).map((p, k) => p.distanceTo(pts[k])), all = lens.reduce((a, c) => a + c, 0) || 1;
-  let left = Math.min(1, Math.max(0, (ghostT - 0.35) / 1.7)) * all, k = 0;
+  let left = Math.min(1, Math.max(0, (ghostT - 0.35) / 1.5)) * all, k = 0;
   while (k < lens.length - 1 && left > lens[k]) left -= lens[k++];
   const at = lens.length ? pts[k].clone().lerp(pts[k + 1], lens[k] ? Math.min(1, left / lens[k]) : 0) : pts[0];
   ghostObj.position.set(at.x, 0.08 + 0.04 * Math.sin(ghostT * 7), at.z);
-  const fade = ghostT < 0.3 ? ghostT / 0.3 : ghostT > 2.2 ? Math.max(0, 1 - (ghostT - 2.2) / 0.5) : 1;
+  const fade = ghostT < 0.3 ? ghostT / 0.3 : ghostT > 2.9 ? Math.max(0, 1 - (ghostT - 2.9) / 0.45) : 1;
   holo.opacity = 0.62 * fade;
   // a trail of sparks behind it as it glides
-  if ((ghostSpark -= dt) <= 0 && fade > 0.5 && ghostT > 0.35 && ghostT < 2.1) {
+  if ((ghostSpark -= dt) <= 0 && fade > 0.5 && ghostT > 0.35 && ghostT < 1.85) {
     ghostSpark = 0.06;
     fx.glow.spawn({ x: at.x + (Math.random() - 0.5) * 0.4, y: 0.45 + Math.random() * 0.3, z: at.z + (Math.random() - 0.5) * 0.4, life: 0.5, size: 0.2, color: 0x9ff3ff, alpha: 0.75 });
   }
@@ -698,7 +777,8 @@ function rattle(i) {
   const p = pos[i], b = L.blocks[i], cells = [];
   for (let j = 0; j < b.h; j++) for (let k = 0; k < b.w; k++) cells.push([p[0] + k, p[1] + j]);
   board.flash(cells);
-  say(`Padlocked: its key is in the ${SUPPLY[key.color].name} crate`);
+  // (which one, with two of the key's colour on the board: playtest 2026-11-09, Dan, levels 16 and 20, "a coin flip")
+  say(`Padlocked: its key is in ${crateWords(L.blocks[i].lock)}`);
 }
 
 function noWay() {
@@ -710,7 +790,8 @@ function noWay() {
   if (b.axis && (b.axis === 'x' ? Math.abs(dy) > Math.abs(dx) : Math.abs(dx) > Math.abs(dy))) {
     crates[i].jig = 1;
     sfx.play('bump', 0.22, 0.85);
-    return say('Heavy crate: it slides only the way its arrows point');
+    (blinkI = i), (blinkAt = t);
+    return say('Heavy crate: it slides only along its skids');
   }
   const x0 = Math.round(drag.fx), y0 = Math.round(drag.fy), cells = [];
   if (Math.abs(dx) >= Math.abs(dy)) for (let k = 0; k < b.h; k++) cells.push([dx > 0 ? x0 + b.w : x0 - 1, y0 + k]);
@@ -725,6 +806,7 @@ function noWay() {
   crates[i].jig = 1;
   crates[i].squashV -= 1;
   sfx.play('bump', 0.22, 0.85);
+  if (hit.some(([x, y]) => /rock|stump/.test(blockerName(x, y) || ''))) tipRocks();
   // into the frame where a gate is: why it would not let the crate out (playtest 2026-10-29 and benchmark 2026-11-07: a drag
   // into the wrong gate did nothing anyone could see)
   const edge = hit.find(([x, y]) => x < 0 || y < 0 || x >= L.w || y >= L.h);
@@ -733,7 +815,7 @@ function noWay() {
   const lo = across ? y0 : x0, hi = lo + (across ? b.h : b.w), here = L.gates.filter((g) => g.side === side && g.at < hi && g.at + g.len > lo);
   const mine = here.find((g) => g.color === b.color);
   if (mine && mine.openAt > moves) say(`${CREW_NAME[b.color]} is not back yet`);
-  else if (mine && b.axis && (b.axis === 'x') !== across) say('Heavy crates leave only the way their arrows point');
+  else if (mine && b.axis && (b.axis === 'x') !== across) ((blinkI = i), (blinkAt = t), say('Heavy crates leave only along their skids'));
   else if (mine && (across ? b.h : b.w) > mine.len) say('Too wide for this gate');
   else if (mine) say('Line it up with its gate');
   else if (here.length) say(`Not this gate: this crate goes out by the ${b.color} flags`);
@@ -778,13 +860,57 @@ function moved(blocked) {
   }
 }
 
-function release() {
-  if (!drag) return;
-  const { i, from, before, occ } = drag, b = L.blocks[i];
-  // settle on the nearest free cell (the footprint is free, so a rounding of it is too)
+// where the held crate settles if let go now: the nearest free cell (the footprint is free, so a rounding of it is too)
+function settleSpot() {
+  const { i, from, occ } = drag, b = L.blocks[i];
   const cands = [[Math.round(drag.fx), Math.round(drag.fy)], [Math.floor(drag.fx), Math.floor(drag.fy)], [Math.ceil(drag.fx), Math.ceil(drag.fy)], [Math.floor(drag.fx), Math.ceil(drag.fy)], [Math.ceil(drag.fx), Math.floor(drag.fy)]]
     .map(([x, y]) => [clamp(x, 0, L.w - b.w), clamp(y, 0, L.h - b.h)]);
-  const spot = cands.find(([x, y]) => fits(i, x, y, occ)) || from;
+  return cands.find(([x, y]) => fits(i, x, y, occ)) || from;
+}
+
+// what stands on a cell, in words: a rock, a stump, the pond, a crate; null if nothing (or off the board)
+function blockerName(x, y) {
+  if (x < 0 || y < 0 || x >= L.w || y >= L.h) return null;
+  if ((L.pond || []).some(([px, py]) => px === x && py === y)) return 'the pond';
+  if (L.walls.some(([wx, wy]) => wx === x && wy === y)) return wallModel(x, y).startsWith('stump') ? 'a stump' : 'a rock';
+  const j = blockAt(x, y);
+  return j >= 0 ? `the ${SUPPLY[L.blocks[j].color].name} crate` : null;
+}
+// the first time a crate runs into a rock or a stump: what they are, there and then (playtest 2026-11-07, Ruth, Jonas, Leo:
+// level 3 needed it, level 4's card said it)
+function tipRocks() {
+  if (watching()) return;
+  try {
+    if (store.getItem('bd3.tipRocks') === '1' && !playtest) return;
+    store.setItem('bd3.tipRocks', '1');
+  } catch {}
+  say('Rocks and stumps never move: drag round them. Corners and all, it is one move', 5);
+}
+// let go short of the finger, stopped by something on the way: the drag still counts, so say what stopped it, flash it, and
+// point at Undo (playtest 2026-11-07, Leo: two drags fell short on level 6 with no sign why, and bedtime came)
+function stoppedShort(i, spot, tx, ty) {
+  const b = L.blocks[i], dx = tx - spot[0], dy = ty - spot[1];
+  if (Math.hypot(dx, dy) < 1.4) return;
+  const cells = [];
+  if (Math.abs(dx) >= Math.abs(dy)) for (let k = 0; k < b.h; k++) cells.push([dx > 0 ? spot[0] + b.w : spot[0] - 1, spot[1] + k]);
+  else for (let k = 0; k < b.w; k++) cells.push([spot[0] + k, dy > 0 ? spot[1] + b.h : spot[1] - 1]);
+  const hit = cells.filter(([x, y]) => blockerName(x, y));
+  if (!hit.length) return;
+  board.flash(hit);
+  const what = blockerName(...hit[0]), el = $('undo');
+  el.classList.remove('pulse');
+  void el.offsetWidth;
+  el.classList.add('pulse');
+  say(`Stopped by ${what}. It still counts as a move: Undo gives it back`, 4);
+  note.drag = true;
+  if (what === 'a rock' || what === 'a stump') try {
+    store.setItem('bd3.tipRocks', '1');
+  } catch {}
+}
+
+function release() {
+  if (!drag) return;
+  const { i, from, before } = drag, spot = settleSpot();
   // let go in front of its own gate after bringing it there, or while still pushing into it: out it goes (a finger aims at
   // the flags, which stand above the ground, so on the near side it lets go a row short; playtest 2026-10-24)
   const gate = exitGate(L, i, spot[0], spot[1], moves);
@@ -802,9 +928,11 @@ function release() {
       return;
     }
   }
+  const { tx, ty } = drag;
   drag = null;
   pos[i] = spot.slice();
   crates[i].target.copy(cellCenter(i, spot[0], spot[1]));
+  if ((spot[0] !== from[0] || spot[1] !== from[1]) && !watching()) stoppedShort(i, spot, tx, ty);
   endMove(i, from, before);
 }
 
@@ -872,6 +1000,7 @@ function endMove(i, from, before) {
     endAt = t + 1.6;
   }
   ui();
+  lookAhead();
 }
 
 function undo() {
@@ -919,9 +1048,12 @@ function undo() {
   hinted = null;
   emberUntil = 0;
   if (!thinking) ember.close();
+  // (and a warning, or a word about the drag just undone, was about the board before it too)
+  if (note && (note.warn || note.drag)) note = null;
   sfx.play('pick', 0.4, 0.9);
   sfx.whoosh(false, 0.14);
   ui();
+  lookAhead();
 }
 
 // ---- input: the pointer on the board's plane, in cells ----
@@ -940,10 +1072,13 @@ canvas.addEventListener('pointerdown', (e) => {
   sfx.wake();
   if (state !== 'play' || watching() || drag) return;
   const g = gridAt(e);
-  if (!g) return;
-  let i = blockAt(Math.floor(g.x), Math.floor(g.y));
-  if (i < 0) i = crateNear(g.x, g.y);
-  if (i < 0) return;
+  let i = g ? blockAt(Math.floor(g.x), Math.floor(g.y)) : -1;
+  if (g && i < 0) i = crateNear(g.x, g.y);
+  if (i < 0) {
+    const tag = tagAt(e);
+    if (tag) explainTag(tag);
+    return;
+  }
   if (locked(L, pos, i)) return rattle(i);
   try {
     canvas.setPointerCapture(e.pointerId);
@@ -951,6 +1086,20 @@ canvas.addEventListener('pointerdown', (e) => {
   grab(i, g.x, g.y);
   pointerLook(e);
 });
+// a tap on a countdown tag over a gate: what it counts (playtest 2026-11-09, Dan, level 19: tapping it did nothing, and
+// which crew was late and which early was a guess)
+function tagAt(e) {
+  const r = canvas.getBoundingClientRect(), reach = Math.max(28, r.height * 0.045);
+  for (const tag of camp.tags()) {
+    const p = tag.at.clone().project(camera), sx = r.left + ((p.x + 1) / 2) * r.width, sy = r.top + ((1 - p.y) / 2) * r.height;
+    if (Math.hypot(e.clientX - sx, e.clientY - sy) < reach) return tag;
+  }
+  return null;
+}
+function explainTag(tag) {
+  sfx.play('pick', 0.2, 1.6);
+  say(tag.late ? `${crewName(tag.color)} is out in the forest, back in ${movesWord(tag.n)}: their gate opens then` : `${crewName(tag.color)} goes to bed in ${movesWord(tag.n)}: their gate shuts then`, 4);
+}
 // a mouse over a crate it can take: an open hand, a closed one while dragging, "no" over a padlocked crate (Oleg,
 // 2026-11-07: "on desktop the cursor is not indicating that draggable option is available")
 function pointerLook(e) {
@@ -961,6 +1110,7 @@ function pointerLook(e) {
     let i = g ? blockAt(Math.floor(g.x), Math.floor(g.y)) : -1;
     if (g && i < 0) i = crateNear(g.x, g.y);
     if (i >= 0) look = locked(L, pos, i) ? 'not-allowed' : 'grab';
+    else if (tagAt(e)) look = 'help';
   }
   if (canvas.style.cursor !== look) canvas.style.cursor = look;
 }
@@ -980,6 +1130,7 @@ canvas.addEventListener('pointerleave', () => !drag && (canvas.style.cursor = ''
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 $('restart').onclick = () => {
   sfx.wake();
+  showing = false;   // (a "Show me" skipped, then Restart: the player's own try, not the replay again)
   busy(load);
 };
 $('undo').onclick = () => {
@@ -1118,6 +1269,8 @@ function updateCrate(c, i, dt) {
   c.group.position.set(c.cur.x, 0, c.cur.z);
   c.body.position.y = c.lift;
   c.body.rotation.set(c.tiltX, Math.sin(t * 40) * 0.05 * c.jig, c.tiltZ);
+  // a key crate's gold key glints now and then (each its own beat)
+  if (c.keyGold) c.keyGold.emissiveIntensity = 0.3 + 1.1 * Math.max(0, Math.sin(t * 1.6 + i * 2.1)) ** 10;
   const s = clamp(c.squash, -0.25, 0.25);
   c.body.scale.set(1 - s * 0.5, 1 + s, 1 - s * 0.5);
 }
@@ -1290,6 +1443,12 @@ function frameFor(w, h, kind) {
     return { look, d };
   };
   const whole = fit(all);
+  // a newly earned extra: closer in on its place, with a little of the camp round it (on the board: the whole camp)
+  if (kind === 'extra') {
+    if (!spotAt) return { ...whole, dir };
+    const s = spotAt, m = 3.2;
+    return { ...fit([new THREE.Vector3(s.x - s.w / 2 - m, 0, s.z - s.d / 2 - m), new THREE.Vector3(s.x + s.w / 2 + m, 0, s.z + s.d / 2 + m)], 1.2), dir };
+  }
   if (kind !== 'play') return { ...whole, dir };
   // playing: on a phone the board and its gates' paths fill the width (the crates' landing spots and the camp run off the
   // sides); on a wide screen zoomed out from the board's own frame only as far as keeps the board big (a third at most)
@@ -1362,13 +1521,16 @@ function ui() {
   $('starTotal').textContent = shownTotal;
   // the star goal up front ("Best: 9" read as somebody's score, playtest 2026-10-24)
   $('level').textContent = `Level ${levelIndex + 1}`;
-  $('movesText').textContent = state === 'won' ? 'All delivered!' : leftMoves === 1 ? '1 move before dark' : `${leftMoves} moves before dark`;
+  // (while "Show me" plays, or after it is skipped, the way's length: "8 moves before dark" over a stopped replay misled,
+  // playtest 2026-11-09, Maya)
+  $('movesText').textContent = state === 'won' ? 'All delivered!' : showing ? `The way in ${L.par} moves` : leftMoves === 1 ? '1 move before dark' : `${leftMoves} moves before dark`;
   $('moves').classList.toggle('low', leftMoves <= 2 && state === 'play');
   $('best').innerHTML = `<b>★★★</b> in ${L.par} moves`;
   $('undo').disabled = !hist.length || !(state === 'play' || (state === 'lost' && lostTo !== null));
   // (the countdowns to bedtime and to a crew back late live in Ember's answers since 2026-11-07, Oleg: "not displayed
   // constantly but when the user uses the assistant"; the gates still carry their numbers)
-  bubble.set(note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : levelIndex === 0 && !q.has('proto') && moves === 0 ? 'Drag a crate out through the gate of its colour' : levelIndex === 0 && !q.has('proto') && moves > 0 && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : levelIndex === 0 && !q.has('proto') && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
+  // (nothing in the bubble under a card: "Show me"'s caption stuck out behind the "Your turn?" card, playtest 2026-11-09, Maya)
+  bubble.set($('card').classList.contains('on') ? '' : note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : levelIndex === 0 && !q.has('proto') && moves === 0 ? 'Drag a crate out through the gate of its colour' : levelIndex === 0 && !q.has('proto') && moves > 0 && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : levelIndex === 0 && !q.has('proto') && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
   if (weather) $('weather').textContent = WEATHER_LABEL[weather.kind()];
   const hb = $('hintBtn');
   hb.hidden = watchUrl || cover || q.has('proto') || state !== 'play' || $('card').classList.contains('on');
@@ -1411,17 +1573,20 @@ const INTRO = [
   null,
   { title: 'Level 2: bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
   { title: 'Level 3: two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
-  { title: 'Level 4: round the rocks', rule: '<b>Rocks and stumps never move.</b> Drag a crate round them in one go.', pic: 'rocks' },
+  // (it taught dragging round corners, which level 1 already needs: playtest 2026-11-09, Leo, Maya)
+  { title: 'Level 4: round the rocks', rule: '<b>Rocks and stumps all over:</b> plan each crate’s way round them.', pic: 'rocks' },
   { title: 'Level 5: three early crews', rule: '<b>Three crews go to bed early.</b> Watch the numbers on the gates.' },
   { title: 'Level 6: tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.', pic: 'rocks' },
   { title: 'Level 7: the whole camp', rule: '<b>Every crew is here:</b> all six gates.', pic: 'gates' },
-  { title: 'Level 8: long loads', rule: '<b>Long loads</b> are four cells long: they turn no corners in a tight spot.', pic: 'long' },
+  // (it said they "turn no corners in a tight spot": a rule that never bit, playtest 2026-11-07, all five)
+  { title: 'Level 8: long loads', rule: '<b>Long loads</b> are four cells long: to move sideways they need a gap four cells wide.', pic: 'long' },
   { title: 'Level 9: long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.', pic: 'long' },
-  { title: 'Level 10: heavy crates', rule: '<b>Heavy crates run on skids:</b> only the way the arrows point.', pic: 'heavy' },
+  { title: 'Level 10: heavy crates', rule: '<b>Heavy crates run on skids:</b> they slide only along them. Pick one up to see its way.', pic: 'heavy' },
   { title: 'Level 11: heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.', pic: 'heavy' },
   { title: 'Level 12: the pond', rule: '<b>A pond fills a corner.</b> Nothing crosses the water.', pic: 'pond' },
   { title: 'Level 13: by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.', pic: 'pond' },
-  { title: 'Level 14: the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out.', pic: 'padlock' },
+  // (the lock's colour rule came only on level 16's card: playtest 2026-11-09, Ruth, Jonas)
+  { title: 'Level 14: the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out. The lock’s colour is the key crate’s.', pic: 'padlock' },
   { title: 'Level 15: keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?', pic: 'padlock' },
   { title: 'Level 16: two padlocks', rule: '<b>Two padlocks:</b> the colour on each lock is the crate with its key.', pic: 'padlock' },
   { title: 'Level 17: back late', rule: '<b>A crew is out in the forest.</b> Their gate opens when they are back.', pic: 'late' },
@@ -1528,18 +1693,32 @@ function showCard() {
     celebrate = 3.2;
     // the camp's new extra pops up as the stars land; the card names it, or says what the next one needs
     const total = starTotal(), next = nextExtra(total), extra = fresh.length && EXTRAS.find((e) => e.id === fresh[fresh.length - 1]);
-    for (const id of fresh) camp.extras.reveal(id, 1.3);
+    if (!spotlit) for (const id of fresh) camp.extras.reveal(id, 1.3);
     if (extra) $('cardExtra').innerHTML = `<span class="unlock">${icon(extra.id, 26)}<span>New for the camp: <b>${extra.name}</b>!</span></span>`;
     else if (!q.has('proto')) $('cardExtra').innerHTML = next ? `★ ${total} · ${next.need} more for the ${next.name.toLowerCase()}` : `★ ${total} · every extra is in the camp`;
     flyStars(stars - gained, stars);
   }
   $('card').classList.add('on');
+  ui();
   if (view !== 'end') setView('end');
   if (won) sfx.jingle('win');
   else {
     sfx.play('heavy', 0.4, 0.6);
     sfx.jingle('lose', 0.2);
   }
+}
+
+// the camera to the camp's newly earned extra (the last, if two came at once), which pops up as it gets there
+function spotlight() {
+  spotlit = true;
+  const extra = EXTRAS.find((e) => e.id === fresh[fresh.length - 1]);
+  spotAt = camp.extras.where(extra.id);
+  setView('extra');
+  for (const id of fresh) camp.extras.reveal(id, 0.7);
+  $('unlockNote').innerHTML = `${icon(extra.id, 30)}<span>New for the camp: <b>${extra.name}</b>!</span>`;
+  $('unlockNote').classList.add('on');
+  unlockUntil = t + 2.7;
+  setTimeout(() => sfx.chime([659, 880, 1175], 0.06, 0.9), playtest ? 0 : 700);
 }
 
 // the stars won beyond the level's best fly from the card to the total by the trail button, counting it up as they land
@@ -1601,6 +1780,8 @@ $('mapClose').onclick = () => $('map').classList.remove('on');
 function goTo(k) {
   levelIndex = k;
   bot = null;
+  // (a "Show me" skipped, then another level from the camp trail: that level played itself; found 2026-11-09)
+  showing = false;
   load();
   intro();
 }
@@ -1623,6 +1804,9 @@ function step(dt) {
   waveFlags(board.flags, t);
   if (thinking) emberThink(dt);
   if (scanBand) scanBand.visible = !!thinking;
+  board.mark(drag && !watching() ? [...settleSpot(), L.blocks[drag.i].w, L.blocks[drag.i].h] : null);
+  const wc = blinkI >= 0 && crates[blinkI] && !crates[blinkI].gone && !crates[blinkI].out ? crates[blinkI] : null;
+  board.way(wc ? { x: wc.cur.x, z: wc.cur.z, w: wc.b.w, h: wc.b.h, axis: wc.b.axis === 'x' ? 'x' : 'z', age: t - blinkAt } : null);
   board.tick(dt, t, drag ? L.blocks[drag.i].color : teach(dt));
   fireworks(dt);
   // a gate's arch fades while a crate is in its lane by the opening (it would hide the crate on the near side)
@@ -1642,7 +1826,16 @@ function step(dt) {
     }
     if (!endAt && t - wonAt > 1.4) endAt = t;
   }
-  if (endAt && t >= endAt) {
+  if (unlockUntil && t >= unlockUntil) {
+    unlockUntil = 0;
+    $('unlockNote').classList.remove('on');
+  }
+  // a win that earned the camp something new: the camera goes to it first, it pops up, a note names it; then the card
+  // (playtest 2026-11-07, Jonas, Dan, Leo: the card covered the part of the camp where it appeared, so they missed it)
+  if (endAt && t >= endAt && state === 'won' && !showing && !watchUrl && fresh.length && !spotlit) {
+    spotlight();
+    endAt = t + 2.8;
+  } else if (endAt && t >= endAt) {
     endAt = Infinity;
     showCard();
     if (watchUrl && !film && !q.has('stay')) {
@@ -1834,7 +2027,7 @@ if (playtest) {
       }
       // in the page's own order: the settings, cards and the trail over the game's buttons
       const z = (el) => Number(getComputedStyle(el).zIndex) || 0;
-      for (const el of [$('hud'), $('hint'), $('ember'), $('hintBtn'), $('pills'), $('card'), $('settings'), $('howto'), $('intro'), $('map'), $('rotate')].sort((a, b) => z(a) - z(b))) await paint(el);
+      for (const el of [$('hud'), $('hint'), $('ember'), $('hintBtn'), $('pills'), $('unlockNote'), $('card'), $('settings'), $('howto'), $('intro'), $('map'), $('rotate')].sort((a, b) => z(a) - z(b))) await paint(el);
       const res = await fetch(`http://127.0.0.1:5199/${name}`, { method: 'POST', body: out.toDataURL('image/jpeg', 0.75) }).catch(() => null);
       return res && res.ok ? `look: ${out.width}x${out.height}; page x = image x * ${(1 / k).toFixed(3)}, page y = image y * ${(1 / k).toFixed(3)}; played ${(played / 1000).toFixed(1)} s` : 'look failed';
     },

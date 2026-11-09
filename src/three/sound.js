@@ -43,20 +43,26 @@ export const isMuted = () => muted;
 export const soundOn = () => !muted;
 export const musicOn = () => !musicOff;
 
+// (switched on in the settings, a tap: the sound starts afresh on a new audio context, so a phone whose sound died can get it
+// back by hand: see restart)
 export function setSound(on) {
   muted = !on;
   try {
     keep.setItem('bd.sound', on ? '1' : '0');
   } catch {}
-  if (out) out.gain.setTargetAtTime(on ? 1 : 0, ac.currentTime, 0.05);
+  if (on && settled()) restart();
+  else if (out) out.gain.setTargetAtTime(on ? 1 : 0, ac.currentTime, 0.05);
 }
 export function setMusic(on) {
   musicOff = !on;
   try {
     keep.setItem('bd.music', on ? '1' : '0');
   } catch {}
-  if (mg) mg.gain.setTargetAtTime(on ? 0.34 : 0, ac.currentTime, 0.2);
+  if (on && settled()) restart();
+  else if (mg) mg.gain.setTargetAtTime(on ? 0.34 : 0, ac.currentTime, 0.2);
 }
+// (not when the context was made by this same tap)
+const settled = () => ac && performance.now() - builtAt > 1000;
 // the old single switch: both off, or both on
 export function toggleMute() {
   const on = muted && musicOff;
@@ -67,50 +73,104 @@ export function toggleMute() {
 // ?playtest (simulated players, checks) never makes a sound: those tabs run on Oleg's PC
 const silent = /[?&](playtest|silent)\b/.test(location.search);
 
-// call from a touch or click: makes (or resumes) the audio context and loads the sounds once
+// iPhones lose a page's sound when it goes to the background and comes back (2026-11-09, Oleg, on CrazyGames: the sound gone
+// after minimising the browser, and neither the settings nor a reload brought it back). Every iPhone browser is Safari's
+// engine, and its audio context can come back "interrupted", or say "running" and play nothing, and a reload need not help
+// (WebKit bugs 276016, 276687, open). The cure reported there: stop the context and start it again (kick). So it is kicked
+// when it is made, when the page comes back to the front and at the first touch after; one that will not run after a kick
+// is closed and a new one made at the next touch (restart), and switching sound or music on in the settings makes a new one.
+let stale = false, broken = false, made = 0, kicks = 0, builtAt = 0;
+
+// call from a touch or click: makes the audio context (and loads the sounds) once, and mends it when it has gone quiet
 export function wake() {
   if (silent) return;
   try {
-    if (ac) {
-      if (ac.state !== 'running') ac.resume();
-      return;
+    if (!ac) return makeContext();
+    if (broken || ac.state === 'closed') return restart();
+    if (stale || ac.state !== 'running') {
+      stale = false;
+      kick();
     }
-    ac = new (window.AudioContext || window.webkitAudioContext)();
-    master = ac.createGain();
-    master.connect(ac.destination);
-    out = ac.createGain();
+  } catch {}
+}
+
+function makeContext() {
+  try {
+    const c = (ac = new (window.AudioContext || window.webkitAudioContext)()), gen = ++made;
+    builtAt = performance.now();
+    master = c.createGain();
+    master.connect(c.destination);
+    out = c.createGain();
     out.gain.value = muted ? 0 : 1;
     out.connect(master);
-    amb = ac.createGain();
+    amb = c.createGain();
     amb.gain.value = 0.5;
     amb.connect(out);
     for (const list of Object.values(FILES)) {
       for (const n of list) {
-        fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => ac.decodeAudioData(b)).then((d) => (buf[n] = d)).catch(() => {});
+        fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => c.decodeAudioData(b)).then((d) => gen === made && (buf[n] = d)).catch(() => {});
       }
     }
     weather = makeWeatherLoops();
-    mg = ac.createGain();
+    mg = c.createGain();
     mg.gain.value = musicOff ? 0 : 0.34;
     mg.connect(master);
-    music = makeTrack(ac, mg, TRACK);
-    const sg = ac.createGain();
+    music = makeTrack(c, mg, TRACK);
+    const sg = c.createGain();
     sg.gain.value = 0.34;
     sg.connect(out);
-    sting = makeMusic(ac, sg, STING);
+    sting = makeMusic(c, sg, STING);
+    // (a new context on an iPhone whose sound has died can be silent too: kicked once it has started)
+    setTimeout(() => ac === c && kick(), 300);
   } catch {
     ac = null;
   }
 }
 
-// the page hidden (another app in front, the phone locked) stops everything; back in front, it goes on (2026-11-07, Oleg: the
-// music played on on Android with the browser minimised or the phone locked)
+// the context closed and a new one made, with everything on it (the music starts again from the top)
+function restart() {
+  const old = ac;
+  ac = master = out = mg = weather = amb = music = sting = null;
+  for (const n of Object.keys(buf)) delete buf[n];
+  nextBird = nextCricket = nextCrackle = 0;
+  musicDusk = -1;
+  stale = broken = false;
+  try {
+    old.close().catch(() => {});
+  } catch {}
+  makeContext();
+}
+
+// stopped and started again; if it is not running with its clock going a moment later (the page in front), it is broken
+// and the next touch makes a new one
+function kick() {
+  const c = ac, k = ++kicks;
+  if (!c) return;
+  const go = () => c.resume();
+  c.suspend().then(go, go).catch(() => {});
+  const t0 = c.currentTime;
+  setTimeout(() => {
+    if (ac === c && k === kicks && !document.hidden && (c.state !== 'running' || c.currentTime < t0 + 0.2)) broken = true;
+  }, 900);
+}
+
+// the page hidden (another app in front, the phone locked) stops everything (2026-11-07, Oleg: the music played on on
+// Android with the browser minimised or the phone locked); back in front, kicked, and again at the next touch
+function hide() {
+  stale = true;
+  kicks++;
+  if (ac) ac.suspend().catch(() => {});
+}
 document.addEventListener('visibilitychange', () => {
-  if (!ac) return;
-  if (document.hidden) ac.suspend().catch(() => {});
-  else ac.resume().catch(() => {});
+  if (document.hidden) hide();
+  else if (ac) kick();
 });
-addEventListener('pagehide', () => ac && ac.suspend().catch(() => {}));
+addEventListener('pagehide', hide);
+addEventListener('pageshow', (e) => e.persisted && ((stale = true), ac && kick()));
+// (Safari 16.4 and later say when the phone's audio was interrupted, a call say: the next touch kicks it)
+try {
+  navigator.audioSession?.addEventListener?.('statechange', () => navigator.audioSession.state !== 'active' && (stale = true));
+} catch {}
 
 // one of the named sound's variants; vol 0..1, rate around 1, both jittered
 export function play(name, vol = 0.6, rate = 1, delay = 0) {

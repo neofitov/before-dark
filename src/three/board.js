@@ -29,6 +29,10 @@ export function fitted(model, size) {
 
 const shadows = (o) => o.traverse((m) => m.isMesh && (m.castShadow = m.receiveShadow = true));
 
+// which model stands on a wall cell (the same for every level): a rock or a stump; main.js names it when it stops a crate
+const WALL_MODELS = ['Rock_Medium_1', 'stump_round', 'Rock_Medium_3', 'Rock_Medium_2', 'stump_old'];
+export const wallModel = (x, y) => WALL_MODELS[(x * 7 + y * 3) % WALL_MODELS.length];
+
 export function buildBoard(scene, models, L, opts = {}) {
   const W = L.w, H = L.h, ox = -W / 2, oz = -H / 2, r = rng(L.seed || 1);
   const group = new THREE.Group();
@@ -87,13 +91,12 @@ export function buildBoard(scene, models, L, opts = {}) {
   // a pond in a corner (2026-10-28, odd boards): water where its tiles would be, lily pads, reeds along its edges
   if (L.pond) addPond(group, L.pond, ox, oz, r);
 
-  // walls: rocks and stumps fitted to their cell
-  const wallModels = ['Rock_Medium_1', 'stump_round', 'Rock_Medium_3', 'Rock_Medium_2', 'stump_old'];
+  // walls: rocks and stumps fitted to their cell (stumps bigger since the playtest of 2026-11-07: hard to see in the dirt)
   for (const [x, y] of L.walls) {
     if ((L.pond || []).some(([px, py]) => px === x && py === y)) continue;
-    const name = wallModels[(x * 7 + y * 3) % wallModels.length], m = models.get(name);
+    const name = wallModel(x, y), m = models.get(name);
     if (!m) continue;
-    const f = fitted(m, name.startsWith('stump') ? 0.7 : 0.92);
+    const f = fitted(m, name.startsWith('stump') ? 0.82 : 0.92);
     f.position.set(ox + x + 0.5, 0, oz + y + 0.5);
     f.rotation.y = r.next() * Math.PI * 2;
     shadows(f);
@@ -322,8 +325,82 @@ export function buildBoard(scene, models, L, opts = {}) {
       f.t = 0.9;
     }
   }
+  // the held crate's footprint where it would land if let go now (playtest 2026-11-07: in perspective a crate behind another
+  // read a cell narrower, a 2-wide red as 1-wide; Ruth, Maya): a soft shadow on the tiles, the crate's own size, as if it were
+  // held over the spot (2026-11-09, Oleg: a drop shadow, not the white outline it was)
+  const markMat = new THREE.MeshBasicMaterial({ map: footShadow(1, 1), transparent: true, opacity: 0, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const marker = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), markMat);
+  marker.renderOrder = 5;
+  marker.visible = false;
+  group.add(marker);
+  let markK = 0, markOn = false;
+  function mark(at) {
+    markOn = !!at;
+    if (!at) return;
+    const [x, y, w, h] = at;
+    markMat.map = footShadow(w, h);
+    marker.scale.set(w + SHADOW_M * 2, 1, h + SHADOW_M * 2);
+    marker.position.set(ox + x + w / 2, 0.004, oz + y + h / 2);
+  }
+  // a heavy crate picked up (or pulled across its skids): arrows on the ground beyond both its ends, the way the skids let it
+  // slide, blinking a few times and chasing outwards, then gone (2026-11-09, Oleg: the arrows fixed on the lid looked dull;
+  // shown on the ground when it is picked up instead). way({ x, z, w, h, axis, age }) each frame, x and z the crate's middle.
+  const chevron = (L0, A, T) => new THREE.ShapeGeometry(new THREE.Shape([[L0, 0], [L0 - A, A], [L0 - A - T, A], [L0 - T, 0], [L0 - A - T, -A], [L0 - A, -A]].map(([x, y]) => new THREE.Vector2(x, y)))).rotateX(-Math.PI / 2);
+  const fillGeo = chevron(0.13, 0.2, 0.13), rimGeo = chevron(0.18, 0.25, 0.22);
+  const wayMats = [0, 1].map(() => ({
+    fill: new THREE.MeshBasicMaterial({ color: 0xfff4dc, transparent: true, opacity: 0, depthWrite: false }),
+    rim: new THREE.MeshBasicMaterial({ color: 0x2a1a0e, transparent: true, opacity: 0, depthWrite: false }),
+  }));
+  const ways = [-1, 1].map(() => {
+    const side = new THREE.Group();
+    side.userData.chev = wayMats.map((m) => {
+      const c = new THREE.Group(), rim = new THREE.Mesh(rimGeo, m.rim), fill = new THREE.Mesh(fillGeo, m.fill);
+      rim.position.y = 0.012;
+      fill.position.y = 0.016;
+      rim.renderOrder = 7;
+      fill.renderOrder = 8;
+      c.add(rim, fill);
+      side.add(c);
+      return c;
+    });
+    side.visible = false;
+    group.add(side);
+    return side;
+  });
+  const WAY_T = 1.9;
+  function way(at) {
+    const on = !!at && at.age < WAY_T;
+    for (const s of ways) s.visible = on;
+    if (!on) return;
+    const { x, z, w, h, axis, age } = at, ax = axis === 'x', half = (ax ? w : h) / 2;
+    const env = Math.min(1, age / 0.12) * Math.min(1, (WAY_T - age) / 0.45);
+    ways.forEach((s, n) => {
+      const e = n ? 1 : -1;
+      s.position.set(x + (ax ? e * (half + 0.42) : 0), 0, z + (ax ? 0 : e * (half + 0.42)));
+      s.rotation.y = ax ? (e > 0 ? 0 : Math.PI) : e > 0 ? -Math.PI / 2 : Math.PI / 2;
+      s.userData.chev.forEach((c, k) => {
+        // three blinks; the outer chevron a beat after the inner, so they run outwards
+        const p = Math.max(0, Math.sin((age * 1.65 - k * 0.17) * Math.PI * 2));
+        c.position.x = k * 0.32 + p * 0.06;
+        // only on the tiles or out through a gate (not over the frame's planks)
+        const reach = e * (half + 0.42 + k * 0.32), cx = x + (ax ? reach : 0), cz = z + (ax ? 0 : reach);
+        const inX = cx > ox && cx < ox + W, inZ = cz > oz && cz < oz + H;
+        c.visible = inX && inZ ? true
+          : inX ? inGate(cz < oz ? 'top' : 'bottom', Math.floor(cx - ox))
+          : inZ ? inGate(cx < ox ? 'left' : 'right', Math.floor(cz - oz)) : false;
+      });
+    });
+    wayMats.forEach((m, k) => {
+      const p = Math.max(0, Math.sin((age * 1.65 - k * 0.17) * Math.PI * 2));
+      m.fill.opacity = env * (0.3 + 0.7 * p);
+      m.rim.opacity = env * (0.15 + 0.4 * p);
+    });
+  }
   // each frame: the held crate's colour (or null) lights its gate's lane
   function tick(dt, t, lit) {
+    markK += ((markOn ? 1 : 0) - markK) * Math.min(1, dt * 14);
+    marker.visible = markK > 0.02;
+    markMat.opacity = markK * 0.85;
     for (const [color, list] of Object.entries(lanes)) {
       for (const lane of list) {
         lane.k += ((color === lit ? 1 : 0) - lane.k) * Math.min(1, dt * 10);
@@ -339,7 +416,39 @@ export function buildBoard(scene, models, L, opts = {}) {
     }
   }
 
-  return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
+  return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, mark, way, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
+}
+
+// a soft shadow the shape of a w x h crate's footprint (in cells; a crate stands 0.06 in from its cells' edges), fading out
+// over its edge, on a texture SHADOW_M wider each side than the cells; one per size, made once
+const SHADOW_M = 0.25, shadowTex = new Map();
+function footShadow(w, h) {
+  const key = `${w}x${h}`;
+  if (shadowTex.has(key)) return shadowTex.get(key);
+  const px = 40, cw = Math.round((w + SHADOW_M * 2) * px), ch = Math.round((h + SHADOW_M * 2) * px);
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d'), img = ctx.createImageData(cw, ch);
+  const hw = w / 2 - 0.08, hh = h / 2 - 0.08, r = 0.12, soft = 0.24;
+  for (let j = 0; j < ch; j++) {
+    for (let i = 0; i < cw; i++) {
+      const x = Math.abs((i + 0.5) / px - cw / px / 2), y = Math.abs((j + 0.5) / px - ch / px / 2);
+      // the distance to the rounded rectangle's edge (negative inside), then a smooth fall from 1 well inside to 0 outside
+      const qx = x - (hw - r), qy = y - (hh - r);
+      const d = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r;
+      const u = Math.min(1, Math.max(0, (soft * 0.4 - d) / soft)), k = (j * cw + i) * 4;
+      img.data[k] = 22;
+      img.data[k + 1] = 14;
+      img.data[k + 2] = 8;
+      img.data[k + 3] = Math.round(u * u * (3 - 2 * u) * 255);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  shadowTex.set(key, tex);
+  return tex;
 }
 
 // opts: key (this crate holds the key to a padlocked one), lockColor (padlocked: the colour of the crate with its key), mark
@@ -351,10 +460,11 @@ export function buildCrate(models, b, opts = {}) {
   const box = new THREE.Mesh(new RoundedBoxGeometry(w, CRATE_H, d, 3, 0.07), mat);
   box.position.y = CRATE_H / 2;
   body.add(box);
-  // iron straps across the short way, near each end
+  // iron straps across the short way, near each end (not on a heavy crate: a plain crate's dark end straps read as a heavy
+  // one's arrows, playtest 2026-11-09, Leo; a heavy crate is told by its skids)
   const strap = new THREE.MeshStandardMaterial({ color: 0x3c3a3a, roughness: 0.45, metalness: 0.7 });
   const long = Math.max(w, d), across = b.w >= b.h;
-  for (const k of [-1, 1]) {
+  for (const k of b.axis ? [] : [-1, 1]) {
     const off = k * (long / 2 - Math.min(0.2, long * 0.18));
     const st = new THREE.Mesh(new RoundedBoxGeometry(across ? 0.07 : w + 0.03, CRATE_H + 0.03, across ? d + 0.03 : 0.07, 1, 0.015), strap);
     st.position.set(across ? off : 0, CRATE_H / 2, across ? 0 : off);
@@ -362,8 +472,9 @@ export function buildCrate(models, b, opts = {}) {
   }
   shadows(body);
   // what it carries, stencilled on the lid (a flame, a tent, a drop of water...); a long load at both ends
-  // (smaller on a short heavy crate, between its arrows)
-  const size = Math.min(0.62, Math.min(w, d) * 0.72) * (b.axis && (b.axis === 'x' ? b.w : b.h) < 2 ? 0.6 : 1), ends = long >= 3.5 ? [-0.95, 0.95] : [0];
+  // (a key crate two cells or more long: the stencil at one end, the key's badge at the other)
+  const size = Math.min(0.62, Math.min(w, d) * 0.72);
+  const ends = long >= 3.5 ? [-0.95, 0.95] : opts.key && long >= 1.5 ? [-(long / 2 - size / 2 - 0.1)] : [0];
   for (const e of ends) {
     const decal = new THREE.Mesh(new THREE.PlaneGeometry(size, size), stencilMaterial(s.icon));
     decal.rotation.x = -Math.PI / 2;
@@ -371,37 +482,31 @@ export function buildCrate(models, b, opts = {}) {
     body.add(decal);
   }
   const out = { group: g, body };
-  // heavy, on runners (2026-10-28): two iron-shod skids along the way it slides, turned up at the ends, and a painted arrow
-  // at each end of the lid pointing along it
+  // heavy, on runners (2026-10-28): two iron-shod skids along the way it slides, turned up at the ends. Since 2026-11-09
+  // (Oleg: "make the rails slightly bigger") chunkier, standing out along its sides with their turned-up ends past its ends.
+  // The arrows that were on its lid are gone (Oleg, the same day): arrows on the ground blink when it is picked up (board.way)
   if (b.axis) {
-    const ax = b.axis === 'x', runLen = (ax ? w : d) + 0.26, spread = (ax ? d : w) / 2 - 0.09;
-    const iron = new THREE.MeshStandardMaterial({ color: 0x2c2a2a, roughness: 0.4, metalness: 0.8 });
+    const ax = b.axis === 'x', runLen = (ax ? w : d) + 0.42, spread = (ax ? d : w) / 2 - 0.01;
+    const iron = new THREE.MeshStandardMaterial({ color: 0x2c2a2a, roughness: 0.38, metalness: 0.85 });
     for (const k of [-1, 1]) {
-      const skid = new THREE.Mesh(new RoundedBoxGeometry(ax ? runLen : 0.09, 0.08, ax ? 0.09 : runLen, 1, 0.025), iron);
-      skid.position.set(ax ? 0 : k * spread, 0.04, ax ? k * spread : 0);
+      const skid = new THREE.Mesh(new RoundedBoxGeometry(ax ? runLen : 0.14, 0.12, ax ? 0.14 : runLen, 2, 0.035), iron);
+      skid.position.set(ax ? 0 : k * spread, 0.06, ax ? k * spread : 0);
       body.add(skid);
       for (const e of [-1, 1]) {
-        const tip = new THREE.Mesh(new RoundedBoxGeometry(0.09, 0.26, 0.09, 1, 0.025), iron);
-        tip.position.set(ax ? e * (runLen / 2 + 0.02) : k * spread, 0.13, ax ? k * spread : e * (runLen / 2 + 0.02));
+        const tip = new THREE.Mesh(new RoundedBoxGeometry(0.14, 0.36, 0.14, 2, 0.035), iron);
+        tip.position.set(ax ? e * (runLen / 2 + 0.03) : k * spread, 0.17, ax ? k * spread : e * (runLen / 2 + 0.03));
         tip.rotation[ax ? 'z' : 'x'] = (ax ? -e : e) * 0.6;
         body.add(tip);
       }
-    }
-    const arrowGeo = new THREE.ShapeGeometry(new THREE.Shape([new THREE.Vector2(0.2, 0), new THREE.Vector2(-0.08, 0.19), new THREE.Vector2(-0.08, -0.19)]));
-    arrowGeo.rotateX(-Math.PI / 2);
-    const paint = new THREE.MeshStandardMaterial({ color: 0xf6ead0, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2 });
-    for (const e of [-1, 1]) {
-      const arrow = new THREE.Mesh(arrowGeo, paint), reachOut = (ax ? w : d) / 2 - 0.2;
-      arrow.position.set(ax ? e * reachOut : 0, CRATE_H + 0.006, ax ? 0 : e * reachOut);
-      arrow.rotation.y = ax ? (e > 0 ? 0 : Math.PI) : e > 0 ? -Math.PI / 2 : Math.PI / 2;
-      body.add(arrow);
     }
     shadows(body);
   }
   // padlocked: chains crossing the lid and down the sides, a padlock on the front in the colour of the crate with its key
   if (opts.lockColor) {
     const lock = new THREE.Group(), chain = new THREE.MeshStandardMaterial({ color: 0x8a8c90, roughness: 0.35, metalness: 0.85 });
-    for (const [lw, ld] of [[w + 0.05, 0.11], [0.11, d + 0.05]]) {
+    // (thin, and the padlock at the lid's front edge: the chains and a padlock in the lid's middle hid the crate's own colour,
+    // playtest 2026-11-09, Maya and Dan, levels 14 and 19)
+    for (const [lw, ld] of [[w + 0.05, 0.07], [0.07, d + 0.05]]) {
       const band = new THREE.Mesh(new RoundedBoxGeometry(lw, CRATE_H + 0.05, ld, 1, 0.03), chain);
       band.position.y = CRATE_H / 2 + 0.01;
       lock.add(band);
@@ -415,8 +520,8 @@ export function buildCrate(models, b, opts = {}) {
     const hole = opts.mark ? new THREE.Mesh(new THREE.CircleGeometry(0.085, 20), digitMaterial(opts.mark)) : new THREE.Mesh(new THREE.CircleGeometry(0.03, 10), new THREE.MeshBasicMaterial({ color: 0x1a1414 }));
     hole.position.set(0, opts.mark ? -0.005 : -0.02, 0.047);
     padlock.add(lockBody, shackle, hole);
-    // sitting on the lid where the chains cross, tipped to face the camera, big enough to read from it
-    padlock.position.set(0, CRATE_H + 0.2, 0.04);
+    // hanging on the chain at the lid's front edge, tipped to face the camera, big enough to read from it
+    padlock.position.set(0, CRATE_H + 0.12, d / 2 - 0.08);
     padlock.rotation.x = -0.45;
     padlock.scale.setScalar(1.9);
     lock.add(padlock);
@@ -426,29 +531,41 @@ export function buildCrate(models, b, opts = {}) {
   }
   // the key to a padlocked crate, lying gold on the lid
   if (opts.key) {
-    const gold = new THREE.MeshStandardMaterial({ color: 0xf2c440, roughness: 0.25, metalness: 0.9, emissive: 0x6a4a00, emissiveIntensity: 0.25 });
-    const key = new THREE.Group(), bow = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.026, 8, 18), gold);
+    // a chunky gold key, tipped up towards the camera like the padlock, that glints now and then (main.js updateCrate): big
+    // enough to find (playtest 2026-11-09, Jonas, Dan, Ruth), and solid metal rather than on a cream badge (Oleg, 2026-11-09:
+    // the badge looked apart from the game's look)
+    const gold = new THREE.MeshStandardMaterial({ color: 0xf2c440, roughness: 0.22, metalness: 0.9, emissive: 0x7a5200, emissiveIntensity: 0.3 });
+    const iron = new THREE.MeshStandardMaterial({ color: 0x2c2a2a, roughness: 0.4, metalness: 0.8 });
+    const key = new THREE.Group(), bow = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.038, 12, 24), gold);
     bow.rotation.x = Math.PI / 2;
-    bow.position.x = -0.16;
-    const shaft = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.04, 0.04, 1, 0.012), gold);
-    shaft.position.x = 0.04;
-    key.add(bow, shaft);
-    for (const x of [0.1, 0.15]) {
-      const tooth = new THREE.Mesh(new RoundedBoxGeometry(0.035, 0.035, 0.08, 1, 0.01), gold);
-      tooth.position.set(x, 0, 0.05);
+    bow.position.x = -0.17;
+    // a little iron ring through the bow: a dark line that keeps the key apart from a yellow lid
+    const loop = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.014, 8, 18), iron);
+    loop.position.set(-0.26, 0, 0);
+    loop.rotation.y = Math.PI / 2;
+    const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.05, 14).rotateZ(Math.PI / 2), gold);
+    collar.position.x = -0.06;
+    const shaft = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.065, 0.065, 2, 0.02), gold);
+    shaft.position.x = 0.07;
+    key.add(bow, loop, collar, shaft);
+    for (const [x, l] of [[0.12, 0.11], [0.17, 0.08]]) {
+      const tooth = new THREE.Mesh(new RoundedBoxGeometry(0.045, 0.055, l, 2, 0.015), gold);
+      tooth.position.set(x, 0, 0.03 + l / 2);
       key.add(tooth);
     }
-    key.scale.setScalar(1.35);
-    key.rotation.y = 0.5;
-    key.position.set(across ? Math.min(0.32, w / 2 - 0.22) : 0, CRATE_H + 0.03, across ? 0 : Math.min(0.32, d / 2 - 0.22));
-    if (Math.max(w, d) < 1.2) key.position.set(0.1, CRATE_H + 0.03, 0.1);
+    const small = Math.max(w, d) < 1.2;
+    key.scale.setScalar(small ? 1.7 : 1.95);
+    key.rotation.set(-0.55, 0.5, 0);
+    const off = long >= 1.5 ? long / 2 - 0.46 : 0;
+    key.position.set(across ? off : 0, CRATE_H + 0.1, across ? 0 : off);
     key.traverse((m) => m.isMesh && (m.castShadow = true));
     body.add(key);
     out.key = key;
-    // a tag with its lock's number, lying by the key's bow
+    out.keyGold = gold;
+    // a tag with its lock's number at the key's front right (its bow is front left, its teeth back right)
     if (opts.mark) {
-      const tag = new THREE.Mesh(new THREE.CircleGeometry(0.14, 20).rotateX(-Math.PI / 2), digitMaterial(opts.mark));
-      tag.position.set(THREE.MathUtils.clamp(key.position.x - 0.3, -w / 2 + 0.16, w / 2 - 0.16), CRATE_H + 0.045, THREE.MathUtils.clamp(key.position.z + 0.17, -d / 2 + 0.16, d / 2 - 0.16));
+      const tag = new THREE.Mesh(new THREE.CircleGeometry(0.16, 20).rotateX(-Math.PI / 2), digitMaterial(opts.mark));
+      tag.position.set(THREE.MathUtils.clamp(key.position.x + 0.28, -w / 2 + 0.17, w / 2 - 0.17), CRATE_H + 0.045, THREE.MathUtils.clamp(key.position.z + 0.26, -d / 2 + 0.17, d / 2 - 0.17));
       body.add(tag);
       out.keyTag = tag;
     }
