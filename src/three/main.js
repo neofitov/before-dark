@@ -6,7 +6,7 @@
 // through a gate of its colour that it fits; let go, it settles on the nearest cell. A delivered crate hops onto its camp
 // spot's mat, where the spot's worker unpacks it and the camp grows (camp.js). Every move brings the evening on, until night
 // falls; the weather (weather.js) blows, rains or mists over the glade.
-// Address options: ?level=N (1-3; ?proto&level=N: the prototype's 10), ?weather=breeze|rain|mist|clear, ?gates=sill|lane|none,
+// Address options: ?level=N (1-31; ?proto&level=N: the prototype's 10), ?weather=breeze|rain|mist|clear, ?gates=sill|lane|none,
 // ?watch (the solver plays), ?film&w=&h=&secs=&name= (frame-by-frame capture for videos), ?playtest (see PT below).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -58,6 +58,23 @@ try {
     store.setItem('bd3.reached', String(seed.length));
     store.setItem('bd3.stars', JSON.stringify({ ...seed }));
     store.setItem('bd.howto', '1');
+    store.setItem('bd3.v', '2');
+  }
+} catch {}
+// the warm-up (level 1 since 2026-11-10) came in front of the levels there were: progress saved before it moves one level on,
+// once (the stars won on each level, the furthest level reached, the level cards seen)
+try {
+  if (!q.has('proto') && store.getItem('bd3.v') !== '2') {
+    const was = JSON.parse(store.getItem('bd3.stars') || '{}') || {}, moved = {};
+    for (const [k, n] of Object.entries(was)) moved[Number(k) + 1] = n;
+    if (store.getItem('bd3.stars') != null) store.setItem('bd3.stars', JSON.stringify(moved));
+    if (store.getItem('bd3.reached') != null) store.setItem('bd3.reached', String((Number(store.getItem('bd3.reached')) || 0) + 1));
+    for (let k = CAMPAIGN.length; k >= 0; k--) {
+      if (store.getItem(`bd3.card${k}`) !== '1') continue;
+      store.setItem(`bd3.card${k + 1}`, '1');
+      store.removeItem(`bd3.card${k}`);
+    }
+    store.setItem('bd3.v', '2');
   }
 } catch {}
 let reached = 0;
@@ -70,6 +87,8 @@ let best = {};
 try {
   best = JSON.parse(store.getItem('bd3.stars') || '{}') || {};
 } catch {}
+// a level won opens the next one (2026-11-09: levels 21-30 came after level 20, the last until then, where `reached` stopped)
+for (const [k, n] of Object.entries(best)) if (n > 0) reached = Math.max(reached, Math.min(Number(k) + 1, LIST.length - 1));
 const starTotal = () => (q.has('stars') ? Number(q.get('stars')) || 0 : Object.values(best).reduce((s, n) => s + n, 0));
 // what the last win earned (the win card shows it): extras new to the camp, stars more than the level's best; and the total
 // the HUD shows, which counts the new stars in as they fly to it
@@ -294,9 +313,16 @@ function gatePull(i, x, y, dx, dy, occ) {
     const main = across ? Math.abs(dx) >= Math.abs(dy) : Math.abs(dy) >= Math.abs(dx);
     const toward = main && (g.side === 'left' ? dx < 0 && x < 1.3 : g.side === 'right' ? dx > 0 && x + b.w > L.w - 1.3 : g.side === 'top' ? dy < 0 && y < 1.3 : dy > 0 && y + b.h > L.h - 1.3);
     if (!toward) continue;
+    // the nearest row of the opening it can leave by: a rock or a crate just inside the gate closes its row (level 18: pulled
+    // onto the rock's row, a crate on its way past the rock to the open rows stuck against it, check-drags 2026-11-10)
     const p = across ? y : x, lo = g.at, hi = g.at + g.len - span;
-    if (p < lo - 0.85 || p > hi + 0.85) continue;
-    const d = clamp(clamp(Math.round(p), lo, hi) - p, -0.12, 0.12);   // onto a whole row in the opening (half in two rows would catch)
+    let to = null;
+    for (let r = lo; r <= hi; r++) {
+      const edge = g.side === 'left' ? [0, r] : g.side === 'right' ? [L.w - b.w, r] : g.side === 'top' ? [r, 0] : [r, L.h - b.h];
+      if (Math.abs(r - p) <= 0.85 && fits(i, ...edge, occ) && (to === null || Math.abs(r - p) < Math.abs(to - p))) to = r;
+    }
+    if (to === null) continue;
+    const d = clamp(to - p, -0.12, 0.12);   // onto a whole row in the opening (half in two rows would catch)
     if (d && (across ? fits(i, x, y + d, occ) : fits(i, x + d, y, occ))) return { x: across ? x : x + d, y: across ? y + d : y, across };
     return { x, y, across };
   }
@@ -703,7 +729,12 @@ function ghost(dt, m) {
     fx.glow.spawn({ x: at.x + (Math.random() - 0.5) * 0.4, y: 0.45 + Math.random() * 0.3, z: at.z + (Math.random() - 0.5) * 0.4, life: 0.5, size: 0.2, color: 0x9ff3ff, alpha: 0.75 });
   }
 }
-// a crate that can go out now round at least one corner: the shortest such drag, or null
+// the hand's lesson: on the warm-up (level 1), and on level 2 until it is won, for a player who has not yet dragged a crate
+// round a corner (the warm-up asks for one drag round a corner; 2026-11-10, before it level 1 had the whole lesson)
+// (not under level 2's card: it waits until the card is closed)
+const lesson = () => !q.has('proto') && (!!L.warmup || (levelIndex === 1 && !best[1])) && !$('intro').classList.contains('on');
+// a crate that can go out now only round a corner (no straight way out): the shortest such drag, or null (2026-11-10: on
+// level 2 the hand took a crate by its gate up a cell and out, a crate that could leave straight)
 function cornerMove() {
   if (cornerAt === moves) return corner;
   cornerAt = moves;
@@ -712,13 +743,15 @@ function cornerMove() {
   L.blocks.forEach((b, i) => {
     if (!pos[i]) return;
     const r = reach(L, pos, i, pos[i], mask);
+    let bent = null;
     for (const c of r.cells) {
       const g = exitGate(L, i, c[0], c[1], moves);
       if (!g) continue;
       const path = pathTo(r, c[0], c[1]), dirs = path.slice(1).map((p, k) => [p[0] - path[k][0], p[1] - path[k][1]]).concat([OUT[g.side]]);
-      const turns = dirs.some((d, k) => k && (d[0] !== dirs[k - 1][0] || d[1] !== dirs[k - 1][1]));
-      if (turns && (!corner || path.length < corner.len)) corner = { i, to: c, exit: true, len: path.length };
+      if (!dirs.some((d, k) => k && (d[0] !== dirs[k - 1][0] || d[1] !== dirs[k - 1][1]))) return;   // it can go straight
+      if (!bent || path.length < bent.len) bent = { i, to: c, exit: true, len: path.length };
     }
+    if (bent && (!corner || bent.len < corner.len)) corner = bent;
   });
   return corner;
 }
@@ -739,8 +772,8 @@ function teach(dt) {
     handT = 0;
     return L.blocks[hinted.m.i].color;
   }
-  // level 1's lesson: the hand
-  const m = free && levelIndex === 0 && !q.has('proto') && (moves === 0 ? L.solution[0] : !turnedOnce ? cornerMove() : null);
+  // the warm-up's lesson: the hand (its first move, then a drag round a corner; that one on level 2 too, lesson())
+  const m = free && lesson() && (moves === 0 && L.warmup ? L.solution[0] : !turnedOnce ? cornerMove() : null);
   if (!m) {
     el.style.opacity = 0;
     handT = 0;
@@ -1556,7 +1589,7 @@ function ui() {
   // (the countdowns to bedtime and to a crew back late live in Ember's answers since 2026-11-07, Oleg: "not displayed
   // constantly but when the user uses the assistant"; the gates still carry their numbers)
   // (nothing in the bubble under a card: "Show me"'s caption stuck out behind the "Your turn?" card, playtest 2026-11-09, Maya)
-  bubble.set($('card').classList.contains('on') ? '' : note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : levelIndex === 0 && !q.has('proto') && moves === 0 ? 'Drag a crate out through the gate of its colour' : levelIndex === 0 && !q.has('proto') && moves > 0 && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : levelIndex === 0 && !q.has('proto') && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
+  bubble.set($('card').classList.contains('on') ? '' : note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : L.warmup && moves === 0 ? 'Drag a crate out through the gate of its colour' : lesson() && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : L.warmup && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
   if (weather) $('weather').textContent = WEATHER_LABEL[weather.kind()];
   const hb = $('hintBtn');
   hb.hidden = watchUrl || cover || q.has('proto') || state !== 'play' || $('card').classList.contains('on');
@@ -1595,30 +1628,44 @@ const PIC = {
   late: '<path d="M38 4l-9 16h18z M38 12l-11 18h22z" fill="#3e7a34"/><rect x="36.5" y="29" width="3" height="5" fill="#6a4628"/><rect x="2" y="36" width="50" height="6" rx="2" fill="#9a6a3c"/><g fill="#5a3a22"><rect x="8" y="26" width="3" height="16"/><rect x="13" y="26" width="3" height="16"/><rect x="18" y="26" width="3" height="16"/></g><rect x="6" y="25" width="17" height="3" fill="#f05a3c"/><circle cx="45" cy="47" r="3" fill="#ffd2a0"/><path d="M30 48h-8m3-3-3 3 3 3" stroke="#3e9e38" stroke-width="2.2" fill="none" stroke-linecap="round"/><circle cx="14" cy="15" r="6.5" fill="#e2f6d2" stroke="#3a2c4a" stroke-width="1.2"/><text x="14" y="18" font-size="8.5" font-weight="800" fill="#2a2238" text-anchor="middle" font-family="system-ui">4</text>',
 };
 let bedtimePic = null;
+// (each title follows "Level N: "; the warm-up, level 1, teaches by doing: no card)
 const INTRO = [
   null,
-  { title: 'Level 2: bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
-  { title: 'Level 3: two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
+  // (the old level 1, after the warm-up: crates to put aside and two moves to spare)
+  { title: 'make room', rule: '<b>Some crates are in the way:</b> move them aside first. Fewer moves to spare before dark.', pic: 'rocks' },
+  { title: 'bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
+  { title: 'two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
   // (it taught dragging round corners, which level 1 already needs: playtest 2026-11-09, Leo, Maya)
-  { title: 'Level 4: round the rocks', rule: '<b>Rocks and stumps all over:</b> plan each crate’s way round them.', pic: 'rocks' },
-  { title: 'Level 5: three early crews', rule: '<b>Three crews go to bed early.</b> Watch the numbers on the gates.' },
-  { title: 'Level 6: tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.', pic: 'rocks' },
-  { title: 'Level 7: the whole camp', rule: '<b>Every crew is here:</b> all six gates.', pic: 'gates' },
+  { title: 'round the rocks', rule: '<b>Rocks and stumps all over:</b> plan each crate’s way round them.', pic: 'rocks' },
+  { title: 'three early crews', rule: '<b>Three crews go to bed early.</b> Watch the numbers on the gates.' },
+  { title: 'tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.', pic: 'rocks' },
+  { title: 'the whole camp', rule: '<b>Every crew is here:</b> all six gates.', pic: 'gates' },
   // (it said they "turn no corners in a tight spot": a rule that never bit, playtest 2026-11-07, all five)
-  { title: 'Level 8: long loads', rule: '<b>Long loads</b> are four cells long: to move sideways they need a gap four cells wide.', pic: 'long' },
-  { title: 'Level 9: long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.', pic: 'long' },
-  { title: 'Level 10: heavy crates', rule: '<b>Heavy crates run on skids:</b> they slide only along them. Pick one up to see its way.', pic: 'heavy' },
-  { title: 'Level 11: heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.', pic: 'heavy' },
-  { title: 'Level 12: the pond', rule: '<b>A pond fills a corner.</b> Nothing crosses the water.', pic: 'pond' },
-  { title: 'Level 13: by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.', pic: 'pond' },
+  { title: 'long loads', rule: '<b>Long loads</b> are four cells long: to move sideways they need a gap four cells wide.', pic: 'long' },
+  { title: 'long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.', pic: 'long' },
+  { title: 'heavy crates', rule: '<b>Heavy crates run on skids:</b> they slide only along them. Pick one up to see its way.', pic: 'heavy' },
+  { title: 'heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.', pic: 'heavy' },
+  { title: 'the pond', rule: '<b>A pond fills a corner.</b> Nothing crosses the water.', pic: 'pond' },
+  { title: 'by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.', pic: 'pond' },
   // (the lock's colour rule came only on level 16's card: playtest 2026-11-09, Ruth, Jonas)
-  { title: 'Level 14: the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out. The lock’s colour is the key crate’s.', pic: 'padlock' },
-  { title: 'Level 15: keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?', pic: 'padlock' },
-  { title: 'Level 16: two padlocks', rule: '<b>Two padlocks:</b> the colour on each lock is the crate with its key.', pic: 'padlock' },
-  { title: 'Level 17: back late', rule: '<b>A crew is out in the forest.</b> Their gate opens when they are back.', pic: 'late' },
-  { title: 'Level 18: late and early', rule: '<b>One crew back late, one to bed early.</b> Time it.', pic: 'late' },
-  { title: 'Level 19: a long evening', rule: '<b>Pond, padlock, skids, a late crew</b> and an early one.', pic: 'gates' },
-  { title: 'Level 20: the last night', rule: '<b>Everything at once</b>, and every crew in camp.', pic: 'gates' },
+  { title: 'the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out. The lock’s colour is the key crate’s.', pic: 'padlock' },
+  { title: 'keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?', pic: 'padlock' },
+  { title: 'two padlocks', rule: '<b>Two padlocks:</b> the colour on each lock is the crate with its key.', pic: 'padlock' },
+  { title: 'back late', rule: '<b>A crew is out in the forest.</b> Their gate opens when they are back.', pic: 'late' },
+  { title: 'late and early', rule: '<b>One crew back late, one to bed early.</b> Time it.', pic: 'late' },
+  { title: 'a long evening', rule: '<b>Pond, padlock, skids, a late crew</b> and an early one.', pic: 'gates' },
+  { title: 'all together', rule: '<b>Everything at once</b>, and every crew in camp.', pic: 'gates' },
+  // levels 21-30 (2026-11-09): no new rule, the ones there are in new pairs, each one needed
+  { title: 'heavy by the water', rule: '<b>Two heavy crates beside the pond.</b> They can’t step round anything: clear their lines first.', pic: 'heavy' },
+  { title: 'the long way round', rule: '<b>Two long loads and an early crew.</b> Open a gap four wide before they have to move.', pic: 'long' },
+  { title: 'keys on skids', rule: '<b>Two padlocks and a heavy crate.</b> Its skids decide whose key can go first.', pic: 'padlock' },
+  { title: 'late and long', rule: '<b>A crew back late, a long load</b> and a crew that turns in early.', pic: 'late' },
+  { title: 'heavy traffic', rule: '<b>Three heavy crates.</b> None of them steps aside: plan the lanes.', pic: 'heavy' },
+  { title: 'the island', rule: '<b>A big pond and a long load.</b> Little room to turn.', pic: 'pond' },
+  { title: 'night shift', rule: '<b>Two crews back late, one to bed early</b>, and a heavy crate.', pic: 'late' },
+  { title: 'locked by the water', rule: '<b>A padlock, a heavy crate and the pond.</b> Whose key first?', pic: 'padlock' },
+  { title: 'long and heavy', rule: '<b>Every crew, a long load, two heavy crates</b> and two early crews.', pic: 'gates' },
+  { title: 'the last night', rule: '<b>Everything at once:</b> pond, padlock, skids, a long load, a late crew and an early one.', pic: 'gates' },
 ];
 function intro() {
   $('intro').classList.remove('on');   // another level's, left under the camp trail
@@ -1630,12 +1677,13 @@ function intro() {
   } catch {}
   if (seen && !playtest) return;
   const before = new Set(LIST.slice(0, levelIndex).flatMap((l) => l.blocks.map((b) => b.color)));
-  $('introTitle').textContent = I.title;
+  $('introTitle').textContent = `Level ${levelIndex + 1}: ${I.title}`;
   $('introRule').innerHTML = I.rule;
   bedtimePic ??= $('introPic').innerHTML;
   $('introPic').innerHTML = PIC[I.pic] || bedtimePic;
   legend($('introLegend'), before);
   $('intro').classList.add('on');
+  ui();   // (no lesson tip under the card)
 }
 $('introGo').onclick = () => {
   sfx.wake();
@@ -1643,6 +1691,7 @@ $('introGo').onclick = () => {
   try {
     store.setItem(`bd3.card${levelIndex}`, '1');
   } catch {}
+  ui();   // (level 2's corner tip waited for the card)
 };
 
 function button(text, go, alt) {
@@ -2097,7 +2146,7 @@ async function filmLoop() {
   window.filmDone = true;
 }
 
-// ?cover&w=&h=&name= (with ?camp=full&level=7&dusk=0.4&weather=clear, say): the store covers (CrazyGames: 1920x1080,
+// ?cover&w=&h=&name= (with ?camp=full&level=8&dusk=0.4&weather=clear, say): the store covers (CrazyGames: 1920x1080,
 // 800x1200, 800x800, the title the only text, no border): the whole camp at the given light, the title at the bottom
 // (their crop marks the top-left for labels), posted to the scratch saver as <name>.jpg
 async function coverShot() {

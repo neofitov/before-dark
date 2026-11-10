@@ -113,5 +113,18 @@ export function nextOpening(level, moves) {
   return best;
 }
 
+// the wooden leaf of a gate with a clock (bedtime, a crew back late; board.js builds it): `len` cells long, hinged just past
+// one of its posts and, swung open, folded back flat along the outside of the frame. It hinges on the post with room beside
+// it: not across another gate on that side, and if it can be helped, not out past the board's corner. { high: hinged on the
+// post at the high end, at: the hinge (cells along the side), len, past: how far the open leaf reaches out past the corner }
+export const LEAF_PAST = 1.6;   // the most a level may have (levels 24 and 27: 2.5 cells, into the camp's bench, 2026-11-10)
+export function gateLeaf(level, g) {
+  const along = g.side === 'top' || g.side === 'bottom', span = along ? level.w : level.h, len = g.len + 0.34;
+  const others = level.gates.filter((o) => o !== g && o.side === g.side).map((o) => [o.at - 0.4, o.at + o.len + 0.4]);
+  const cost = (a, b) => (others.some(([c, d]) => a < d && c < b) ? 2 : 0) + (a < -0.3 || b > span + 0.3 ? 1 : 0);
+  const lo = g.at - 0.17, hi = g.at + g.len + 0.17, high = cost(hi, hi + len) < cost(lo - len, lo);
+  return { high, at: high ? hi : lo, len, past: Math.max(0, high ? hi + len - span : -(lo - len)) };
+}
+
 export const startPos = (level) => level.blocks.map((b) => [b.x, b.y]);
 export const left = (pos) => pos.reduce((n, p) => n + (p ? 1 : 0), 0);

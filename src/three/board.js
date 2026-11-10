@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { rng } from '../lib/rng.js';
+import { gateLeaf } from '../slide/model.js';
 
 export const GROUND = -0.32, CRATE_H = 0.56;
 
@@ -210,11 +211,7 @@ export function buildBoard(scene, models, L, opts = {}) {
     // another gate on that side, and if it can be helped, not out past the board's corner.
     // A crew back late (2026-10-28) has the same leaf, shut until its worker comes back and swings it open.
     if (g.closeAt != null || g.openAt != null) {
-      const len = g.len + 0.34, pivot = new THREE.Group(), leaf = new THREE.Group(), span = along ? W : H;
-      const others = L.gates.filter((o) => o !== g && o.side === g.side).map((o) => [o.at - 0.4, o.at + o.len + 0.4]);
-      const cost = (a, b) => (others.some(([c, d]) => a < d && c < b) ? 2 : 0) + (a < -0.3 || b > span + 0.3 ? 1 : 0);
-      const lo = g.at - 0.17, hi = g.at + g.len + 0.17, high = cost(hi, hi + len) < cost(lo - len, lo);
-      const at = high ? hi : lo, OFF = 0.37;
+      const { high, at, len } = gateLeaf(L, g), pivot = new THREE.Group(), leaf = new THREE.Group(), OFF = 0.37;
       const hinge = along ? [ox + at + out[0] * OFF, mid[1] + out[1] * OFF] : [mid[0] + out[0] * OFF, oz + at + out[1] * OFF];
       pivot.position.set(hinge[0], GROUND, hinge[1]);
       // a picket gate, taller than a crate: upright pickets in dark wood on two rails, a top rail in the gate's colour (Oleg
