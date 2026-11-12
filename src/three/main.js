@@ -1699,6 +1699,9 @@ function frameFor(w, h, kind) {
 }
 function fitCamera(w, h, glide = false) {
   const f = frameFor(w, h, view), u = camera.userData;
+  // ?film&zoom=0.7: the store video closer in while playing, so the crates read on a small hover tile (2026-11-12); the end
+  // frame stays wide, the whole camp
+  if (film && view === 'play' && q.has('zoom')) f.d *= Number(q.get('zoom'));
   camera.userData = { look: glide && u.look ? u.look : f.look.clone(), d: glide && u.d ? u.d : f.d, dir: glide && u.dir ? u.dir : f.dir.clone(), to: f };
   world.fitFog(Math.max(f.d, frameFor(w, h, 'camp').d));
   const all = [...Object.values(spots).map((s) => s.pos), ...camp.extent()], box = new THREE.Box3().setFromPoints(all.map((p) => p.clone().setY(0)));

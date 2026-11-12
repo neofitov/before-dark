@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-<meta name="robots" content="noindex, nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0d1322">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -162,13 +161,14 @@
       #card.won .stars { font-size: 30px; letter-spacing: 6px; margin: 0; }
       #card.won .row button:first-child { font-size: 16px; padding: 10px 20px; }
     }
-    /* the loading screen: the cover art (title on it) and a progress bar */
-    #load { position: fixed; inset: 0; z-index: 40; background: #0d1322 url(assets/ui/loader-wide.jpg) center bottom / cover no-repeat; transition: opacity 0.5s; }
-    @media (orientation: portrait) { #load { background-image: url(assets/ui/loader-tall.jpg); } }
-    /* a phone is narrower than the art: fit its width (the title whole), the forest's dark green above it */
+    /* the loading screen: the cover art (title on it) and a progress bar. Since 2026-11-12 the drawn store cover
+       (tools/cover-drawn.js), so a player who clicked it sees the same picture: wide with the title in the middle and kept
+       at the top (a 21:9 window loses the bottom, a 4:3 one the sides); upright the 2:3 picture; a phone narrower than
+       2:3 its own, with more sky above (up to 9:19.5) */
+    #load { position: fixed; inset: 0; z-index: 40; background: #0d1322 url(assets/ui/loader-wide.jpg) center top / cover no-repeat; transition: opacity 0.5s; }
+    @media (orientation: portrait) { #load { background-image: url(assets/ui/loader-tall.jpg); background-position: center; } }
     @media (max-aspect-ratio: 2/3) {
-      #load { background: linear-gradient(#13260f calc(100% - 150vw), rgba(19, 38, 15, 0) calc(100% - 150vw + 90px)),
-        url(assets/ui/loader-tall.jpg) center bottom / 100% auto no-repeat, #13260f; }
+      #load { background: #0b0f30 url(assets/ui/loader-phone.jpg) center bottom / cover no-repeat; }
       #load .bar { bottom: 7px; height: 7px; }
     }
     #load .bar { position: absolute; left: 50%; bottom: 2%; transform: translateX(-50%); width: min(60vw, 360px); height: 9px; border-radius: 999px;
