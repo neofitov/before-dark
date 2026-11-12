@@ -108,6 +108,14 @@
     #hint.on { opacity: 1; transform: none; }
     #hint::after { content: ''; position: absolute; right: 40px; bottom: -8px; border: 8px solid transparent; border-bottom: 0;
       border-top-color: rgba(14, 22, 38, 0.9); }
+    /* where it would cover the board (main.js placeBubble; playtest 2026-11-10: CrazyGames' short frames): beside the button,
+       pointing at it; or up under the buttons in a top corner */
+    #hint[data-at=side] { bottom: max(12px, env(safe-area-inset-bottom)); right: calc(22px + var(--btnw, 170px)); }
+    #hint[data-at=side]::after { right: -8px; bottom: auto; top: 50%; margin-top: -8px; border: 8px solid transparent; border-right: 0;
+      border-left-color: rgba(14, 22, 38, 0.9); }
+    #hint[data-at=top-left], #hint[data-at=top-right] { bottom: auto; top: calc(max(10px, env(safe-area-inset-top)) + 58px); }
+    #hint[data-at=top-left] { right: auto; left: 12px; }
+    #hint[data-at=top-left]::after, #hint[data-at=top-right]::after { display: none; }
     #hint .orb { flex: none; width: 18px; height: 18px; border-radius: 50%; box-shadow: 0 0 10px rgba(127, 230, 255, 0.8);
       background: radial-gradient(circle at 40% 35%, #ffffff, #9ff3ff 35%, #2bb7d6 70%, rgba(43, 183, 214, 0) 72%); animation: orb 1.2s ease-in-out infinite; }
     #hintBtn.speak { animation: speak 0.9s ease-in-out 3; }
@@ -139,6 +147,11 @@
     @keyframes starPop { 0% { opacity: 0; transform: scale(0) rotate(-40deg); } 100% { opacity: 1; transform: scale(1) rotate(0); } }
     #card.won .row button:first-child { font-size: 18px; padding: 14px 28px; background: linear-gradient(#5cc753, #3e9e38);
       box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.2); }
+    /* the warm-up's first win: "Next level" fills from the left and goes on by itself when full (main.js flow) */
+    #card button.auto { position: relative; overflow: hidden; }
+    #card button.auto::before { content: ''; position: absolute; inset: 0; background: rgba(255, 255, 255, 0.28); transform-origin: left;
+      transform: scaleX(0); animation: autoFill var(--fill, 3s) linear forwards; }
+    @keyframes autoFill { to { transform: scaleX(1); } }
     /* a short screen (CrazyGames' smaller frames are 462 px tall): a compact card, so the camp above it stays big */
     @media (max-height: 560px) {
       #card .box { padding: 9px 16px 11px; min-width: 220px; }

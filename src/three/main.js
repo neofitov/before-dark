@@ -23,6 +23,7 @@ import { drawTrail, drawExtras, nextExtra, icon } from './trail.js';
 import { makeWeather, KINDS } from './weather.js';
 import * as sfx from './sound.js';
 import { makeEmber, makeBubble } from './ember.js';
+import { freeUnused, owned } from './free.js';
 
 const KENNEY = ['barrel-open', 'barrel', 'chest', 'bedroll', 'resource-wood', 'bucket', 'box-open', 'stump_round', 'stump_old', 'deer', 'fox'];
 const PEOPLE = ['character-male-b', 'character-female-b', 'character-male-e', 'character-male-a', 'character-female-c', 'character-female-f'];
@@ -142,8 +143,15 @@ async function loadModels() {
 let campPortrait = false, L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
 // a win that earned the camp something new: the camera has been to it (spotlight), and where it is (null: on the board)
 let spotlit = false, spotAt = null, unlockUntil = 0;
-// a heavy crate picked up: which, and when (its way blinks on the ground for a moment: board.way)
-let blinkI = -1, blinkAt = 0;
+// the warm-up's first win flows on into level 2: no camera to the lanterns, the card's one button fills and goes on by itself
+// at flowAt (CrazyGames 2026-11-11, the first full day with the warm-up: desktop players past one minute fell from 52% to 31%,
+// the warm-up is won in half a minute and its card was a place to stop)
+let flow = false, flowAt = 0;
+const FLOW_SECS = 3;
+// a heavy crate picked up: which, and when (its way blinks on the ground for a moment: board.way); and the heavy crates still
+// to show theirs as the level starts (step()), the first time it is set up in this visit
+let blinkI = -1, blinkAt = 0, wayQueue = null;
+const waysShown = new Set();
 // Ember's hinted move that ends on the board, and the position it was given for (its end stays outlined while that holds)
 let aimed = null;
 // the largest board in the game: the camp's places and the forest's clearing are the same in every level
@@ -174,10 +182,11 @@ function cellCenter(i, x, y) {
 }
 
 function load() {
+  let removed = [];
   if (board) {
+    removed = [board.group, ...crates.map((c) => c.group), ...camp.dispose()];
     scene.remove(board.group);
     for (const c of crates) scene.remove(c.group);
-    camp.dispose();
   }
   L = LIST[levelIndex];
   // each level has its own weather (Oleg, 2026-10-24); the pill still changes it while playing, ?weather= for tests
@@ -194,7 +203,12 @@ function load() {
   spotlit = false;
   spotAt = null;
   unlockUntil = 0;
+  flow = false;
+  flowAt = 0;
   blinkI = -1;
+  const heavy = L.blocks.map((b, i) => (b.axis ? i : -1)).filter((i) => i >= 0);
+  wayQueue = heavy.length && !waysShown.has(levelIndex) && !film && !cover ? { list: heavy, at: null } : null;
+  waysShown.add(levelIndex);
   aimed = null;
   $('unlockNote').classList.remove('on');
   ember.close();
@@ -225,7 +239,12 @@ function load() {
   view = 'play';
   resize();
   sfx.jingle('start');
+  settleShadowType();
+  tidyShadows();
+  // the old level's geometries and textures off the graphics card (free.js)
+  if (removed.length) freeUnused(scene, removed, modelOwned ||= owned([...gltfs.values()].map((g) => g.scene)));
 }
+let modelOwned = null;
 
 // setting a level up takes a moment (the camp and its builds made anew, then drawn: about a quarter of a second on a PC, a
 // second on a phone) and the page stands still meanwhile (Oleg, 2026-11-07: "restart button freezes the game - add a
@@ -545,22 +564,48 @@ function crateWords(i) {
   const col = x < L.w / 3 ? 'left' : x > (2 * L.w) / 3 ? 'right' : '', row = y < L.h / 3 ? 'top' : y > (2 * L.h) / 3 ? 'bottom' : '';
   return `the ${name} crate ${row || col ? `at the ${[row, col].filter(Boolean).join(' ')}` : 'in the middle'}`;
 }
+// a hinted move whose way bends: what a straight drag would run into ("the stump", "the water crate"), or "the corner";
+// null for a straight one (playtest 2026-11-11, Maya on levels 4 and 5, Leo on level 7: "Nothing stands in its way" and
+// the gate's lit lane read as a straight drag, and the crate stopped at a stump; the glowing copy's bends went unseen)
+function bendOf(m) {
+  const path = pathTo(reach(L, pos, m.i, pos[m.i], darkMask(L, moves)), m.to[0], m.to[1]);
+  const dirs = path.slice(1).map((p, k) => [p[0] - path[k][0], p[1] - path[k][1]]);
+  if (m.exit) dirs.push(OUT[exitGate(L, m.i, m.to[0], m.to[1], moves).side]);
+  if (!dirs.some((d, k) => k && (d[0] !== dirs[k - 1][0] || d[1] !== dirs[k - 1][1]))) return null;
+  // lined up with its gate (or the spot), straight at it from where the crate stands: the first thing its leading edge meets
+  // (not lined up, the way has to turn anyway: "the corner")
+  const b = L.blocks[m.i], [px, py] = pos[m.i], last = dirs[dirs.length - 1];
+  const [dx, dy] = m.exit ? last : Math.abs(m.to[0] - px) >= Math.abs(m.to[1] - py) ? [Math.sign(m.to[0] - px), 0] : [0, Math.sign(m.to[1] - py)];
+  const g = m.exit && exitGate(L, m.i, m.to[0], m.to[1], moves);
+  const lined = g ? (dx ? py >= g.at && py + b.h <= g.at + g.len : px >= g.at && px + b.w <= g.at + g.len) : dx ? m.to[1] === py : m.to[0] === px;
+  if (!lined) return 'the corner';
+  for (let s = 1; s < Math.max(L.w, L.h); s++) {
+    const cells = [];
+    if (dx) for (let k = 0; k < b.h; k++) cells.push([dx > 0 ? px + b.w - 1 + s : px - s, py + k]);
+    else for (let k = 0; k < b.w; k++) cells.push([px + k, dy > 0 ? py + b.h - 1 + s : py - s]);
+    if (cells.every(([x, y]) => x < 0 || y < 0 || x >= L.w || y >= L.h)) break;
+    const hit = cells.map(([x, y]) => blockerName(x, y)).find((n) => n && n !== `the ${SUPPLY[b.color].name} crate`);
+    if (hit) return hit.replace(/^a /, 'the ');
+  }
+  return 'the corner';
+}
 function answer(r) {
   if (!r.move) return offWay(r.capped);
-  const m = r.move, which = crateWords(m.i), more = r.par - moves, stars = starsFor(r.par), why = reasonFor(m);
-  hinted = { m, at: moves, until: t + 14 };
+  const m = r.move, which = crateWords(m.i), more = r.par - moves, stars = starsFor(r.par), bend = bendOf(m), why = reasonFor(m, bend);
+  hinted = { m, at: moves, until: t + 14, bend };
   // (and where it ends stays outlined until the board changes: board.aim)
   aimed = m.exit ? null : { m, key: posKey(pos) };
+  const round = bend ? `, round ${bend}` : '';
   ember.answer({
     // (where it goes: the glowing copy glides there and waits; it read as a stop on the way, playtest 2026-11-07, Maya)
-    say: m.exit ? `Move ${which} out through its gate.` : `Move ${which} to the outlined spot, where its glowing copy stops.`,
+    say: m.exit ? `Move ${which} out through its gate${round}.` : `Move ${which} to the outlined spot${round}, where its glowing copy stops.`,
     facts: `Best from here: ${more} more move${more === 1 ? '' : 's'} · ${stars === 3 ? '★★★ still possible' : stars === 2 ? 'now ★★ at best' : 'now ★ at best'}`,
     why: [why.text, headsUp(why.crew)].filter(Boolean).join(' '),
   });
   sfx.chime([784, 1047, 1319], 0.06, 0.8);
 }
 // why this move, from the rules: its crew's bedtime close, the key it holds, a crate it opens the way for; else what it is
-function reasonFor(m) {
+function reasonFor(m, bend = null) {
   const b = L.blocks[m.i], name = SUPPLY[b.color].name;
   const bed = L.gates.filter((g) => g.color === b.color && g.closeAt > moves).sort((a, c) => a.closeAt - c.closeAt)[0];
   if (m.exit && bed && bed.closeAt - moves <= 3) return { text: `${crewName(b.color)} goes to bed in ${movesWord(bed.closeAt - moves)}, so the ${name} goes first.`, crew: b.color };
@@ -570,6 +615,7 @@ function reasonFor(m) {
   after[m.i] = m.exit ? null : m.to.slice();
   const freed = L.blocks.findIndex((o, k) => k !== m.i && pos[k] && !exitSpot(L, pos, k, darkMask(L, moves), moves) && exitSpot(L, after, k, darkMask(L, moves + 1), moves + 1));
   if (freed >= 0) return { text: `That opens the way out for the ${SUPPLY[L.blocks[freed].color].name} crate.` };
+  if (m.exit && bend) return { text: `One drag takes it round ${bend} and out: follow the arrows.` };
   return { text: m.exit ? 'Nothing stands in its way: it can go out now.' : 'Parked there, it keeps the way clear for the next moves.' };
 }
 // the camp's next deadline: a crew back late, or the next crew to bed with crates still to come (not one the why named)
@@ -632,7 +678,10 @@ function lookAhead() {
     lookBusy = false;
     if (!data.move && !data.capped && at === posKey(pos) + '|' + moves && state === 'play' && !drag) stuck(at, null);
   };
-  lookWorker.postMessage({ ask, level: L, pos, moves, aside: L.budget - moves - left(pos), secs: LOW ? 1.2 : 2 });
+  // its budget (2026-11-11, CPU and memory work): it ran up to 2 s on a full core and kept up to 800k positions (about
+  // 180 MB) after every move off the way. On 214 random positions a few moves into the levels, 0.6 s and 150k still proved
+  // 129 of the 131 dead ends (most 0.62 s, about 110 MB); a phone gets 0.4 s and 80k (127 of 131)
+  lookWorker.postMessage({ ask, level: L, pos, moves, aside: L.budget - moves - left(pos), secs: LOW ? 0.4 : 0.6, states: LOW ? 80000 : 150000 });
 }
 function stuck(at, color) {
   warned = at;
@@ -686,10 +735,72 @@ let ghostT = 0, ghostOf = null, ghostObj = null;
 // (a plain cyan tint: added light washed out over the pale floor)
 const holo = new THREE.MeshBasicMaterial({ color: 0x3fd4ff, transparent: true, opacity: 0.62, depthWrite: false });
 let ghostSpark = 0;
+// the hinted move's way as arrows on the ground, there the whole time the hint is (2026-11-11 playtest: a look between the
+// glowing copy's glides showed only the gate's straight lit lane, and Maya and Leo dragged straight into a stump; dots
+// followed, then arrows: Oleg, the same day, "replace the ember tracking dots with direction arrows", as Gary asked)
+// (a bright chevron on a dark one: a plain pale mark was lost on the pale tiles and in the gate's lit lane)
+const trailMat = new THREE.MeshBasicMaterial({ color: 0xc8fbff, transparent: true, opacity: 0, depthWrite: false });
+const trailRimMat = new THREE.MeshBasicMaterial({ color: 0x0b3a4a, transparent: true, opacity: 0, depthWrite: false });
+// a chevron pointing along +x, flat on the ground, centred on its middle: tip at x = l, arms a wide, t thick
+const chevronGeo = (l, a, t) => {
+  const g = new THREE.ShapeGeometry(new THREE.Shape([[l, 0], [l - a, a], [l - a - t, a], [l - t, 0], [l - a - t, -a], [l - a, -a]].map(([x, y]) => new THREE.Vector2(x, y))));
+  return g.translate(-(l - (a + t) / 2), 0, 0).rotateX(-Math.PI / 2);
+};
+const trailArrow = chevronGeo(0.125, 0.15, 0.1), trailRim = chevronGeo(0.165, 0.2, 0.18);
+let trail = null, trailOf = null;
+// (a line of arrows down the middle of each row or column the crate passes through, half a cell apart: one line down the
+// crate's middle ran between two rows for a crate two cells wide, and Gary, playtest 2026-11-11, read the wrong row and hit
+// a stump; each points the way the crate goes on that stretch, turning at the corners; up to a cell past the board, through
+// its gate; drawn as two instanced meshes, not a mesh an arrow)
+function routeTrail(m) {
+  if (trailOf === m) return;
+  if (trail) {
+    scene.remove(trail);
+    for (const o of trail.children) o.dispose();
+  }
+  trail = null;
+  trailOf = m;
+  if (!m) return;
+  const b = L.blocks[m.i], [px, py] = pos[m.i];
+  const path = pathTo(reach(L, pos, m.i, pos[m.i], darkMask(L, moves)), m.to[0], m.to[1]).map((c) => c.slice());
+  if (m.exit) {
+    const o = OUT[exitGate(L, m.i, m.to[0], m.to[1], moves).side], e = path[path.length - 1];
+    path.push([e[0] + o[0] * (Math.max(b.w, b.h) + 1), e[1] + o[1] * (Math.max(b.w, b.h) + 1)]);
+  }
+  const arrows = new Map();
+  for (let s = 0; s < path.length - 1; s++) {
+    const [ax, ay] = path[s], [bx, by] = path[s + 1], n = Math.max(Math.abs(bx - ax), Math.abs(by - ay)) * 2;
+    const turn = Math.atan2(-(by - ay), bx - ax);
+    // (from the first step on: the corner itself points the way the crate comes into it)
+    for (let q = 1; q <= n; q++) {
+      for (let k = 0; k < b.w; k++) for (let j = 0; j < b.h; j++) {
+        const x = ax + ((bx - ax) * q) / n + k, y = ay + ((by - ay) * q) / n + j;
+        if (x < -1.01 || y < -1.01 || x > L.w + 0.01 || y > L.h + 0.01) continue;
+        if (x > px - 0.99 && x < px + b.w - 0.01 && y > py - 0.99 && y < py + b.h - 0.01) continue;   // under the crate now
+        const key = `${x.toFixed(2)},${y.toFixed(2)}`;
+        if (!arrows.has(key)) arrows.set(key, [x, y, turn]);
+      }
+    }
+  }
+  const list = [...arrows.values()], m4 = new THREE.Matrix4(), turnY = new THREE.Matrix4();
+  const rims = new THREE.InstancedMesh(trailRim, trailRimMat, list.length), cores = new THREE.InstancedMesh(trailArrow, trailMat, list.length);
+  list.forEach(([x, y, turn], k) => {
+    turnY.makeRotationY(turn);
+    rims.setMatrixAt(k, m4.makeTranslation(board.ox + x + 0.5, 0.03, board.oz + y + 0.5).multiply(turnY));
+    cores.setMatrixAt(k, m4.makeTranslation(board.ox + x + 0.5, 0.035, board.oz + y + 0.5).multiply(turnY));
+  });
+  rims.renderOrder = 6;
+  cores.renderOrder = 7;
+  rims.frustumCulled = cores.frustumCulled = false;
+  trail = new THREE.Group();
+  trail.add(rims, cores);
+  scene.add(trail);
+}
 function ghost(dt, m) {
   if (!m) {
     if (ghostObj) scene.remove(ghostObj);
     ghostObj = ghostOf = null;
+    routeTrail(null);
     return;
   }
   if (ghostOf !== m) {
@@ -710,6 +821,9 @@ function ghost(dt, m) {
     const o = OUT[exitGate(L, m.i, m.to[0], m.to[1], moves).side];
     pts.push(pts[pts.length - 1].clone().add(new THREE.Vector3(o[0] * 1.3, 0, o[1] * 1.3)));
   }
+  routeTrail(m);
+  trailMat.opacity = 0.75 + 0.25 * Math.sin(t * 4);
+  trailRimMat.opacity = 0.55 + 0.15 * Math.sin(t * 4);
   // it glides (0.35-1.85 s), then waits where the move ends for a second before it fades (it used to fade as it arrived: the
   // spot read as a stop on the way, playtest 2026-11-07, Maya); the real crate stretches up at the start (no thud, unlike a
   // hop), so it is plain which one
@@ -731,7 +845,7 @@ function ghost(dt, m) {
 }
 // the hand's lesson: on the warm-up (level 1), and on level 2 until it is won, for a player who has not yet dragged a crate
 // round a corner (the warm-up asks for one drag round a corner; 2026-11-10, before it level 1 had the whole lesson)
-// (not under level 2's card: it waits until the card is closed)
+// (not under a level's card: it waits until the card is closed; level 2 has none since 2026-11-12)
 const lesson = () => !q.has('proto') && (!!L.warmup || (levelIndex === 1 && !best[1])) && !$('intro').classList.contains('on');
 // a crate that can go out now only round a corner (no straight way out): the shortest such drag, or null (2026-11-10: on
 // level 2 the hand took a crate by its gate up a cell and out, a crate that could leave straight)
@@ -770,7 +884,8 @@ function teach(dt) {
   if (free && hinted) {
     el.style.opacity = 0;
     handT = 0;
-    return L.blocks[hinted.m.i].color;
+    // (a way that bends: no straight lit lane, which ran through the stump on level 5 for Maya; the arrows show the way)
+    return hinted.bend ? null : L.blocks[hinted.m.i].color;
   }
   // the warm-up's lesson: the hand (its first move, then a drag round a corner; that one on level 2 too, lesson())
   const m = free && lesson() && (moves === 0 && L.warmup ? L.solution[0] : !turnedOnce ? cornerMove() : null);
@@ -803,6 +918,51 @@ let lastNoWay = 0;
 // a word in the hint line for a moment, in game time (a still picture just after still has it): why a drag was refused, the
 // hint
 let note = null;
+// Ember's bubble kept off the board (playtest 2026-11-10, Leo and Kai on both builds: in CrazyGames' short frames, 800x450
+// and 897x462, the bubble over the Ember button covered the board's bottom-right corner and its gate, where level 1's first
+// drag goes). Where it would cover the board or its gates, it takes the first free place: beside the button, under the
+// top-left buttons, under the star counter (slice.html #hint[data-at]); nowhere free, it stays over the button
+const BUBBLE_AT = ['', 'side', 'top-left', 'top-right'], BUBBLE_W = [330, 260, 210];
+// (its whole line: ui() sets it; the bubble types it in, so its size on screen comes late)
+let bubbleLine = '';
+function placeBubble() {
+  const el = $('hint');
+  if (!el.classList.contains('on') || !board || !L || !bubbleLine) return;
+  // the board with its gates' lanes and countdown badges, which reach about 1.3 cells past the frame (2026-11-11 playtest,
+  // Leo at 897x462, level 6: beside the button it lay over the bottom gates; three quarters of a cell missed them)
+  const r = canvas.getBoundingClientRect(), xs = [], ys = [], M = 1.3;
+  for (const [x, y] of [[-M, -M], [L.w + M, -M], [-M, L.h + M], [L.w + M, L.h + M]]) {
+    const p = new THREE.Vector3(board.ox + x, 0.3, board.oz + y).project(camera);
+    xs.push(r.left + ((p.x + 1) / 2) * r.width);
+    ys.push(r.top + ((1 - p.y) / 2) * r.height);
+  }
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  el.style.setProperty('--btnw', `${$('hintBtn').offsetWidth || 170}px`);
+  const was = el.dataset.at || '';
+  // its full size at each width, from an unseen copy with the whole line; narrower (more lines) where a wide one fits nowhere
+  const probe = el.cloneNode(true);
+  probe.querySelector('.text').textContent = bubbleLine;
+  Object.assign(probe.style, { visibility: 'hidden', left: '0', top: '0', right: 'auto', bottom: 'auto', transition: 'none', transform: 'none' });
+  document.body.appendChild(probe);
+  for (const w of BUBBLE_W) {
+    probe.style.maxWidth = `${Math.min(innerWidth * 0.8, w)}px`;
+    const pb = probe.getBoundingClientRect();
+    for (const at of BUBBLE_AT) {
+      el.dataset.at = at;
+      const b = el.getBoundingClientRect(), fromLeft = at === 'top-left', fromTop = at.startsWith('top');
+      const left = fromLeft ? b.left : b.right - pb.width, right = fromLeft ? b.left + pb.width : b.right;
+      const top = fromTop ? b.top : b.bottom - pb.height, bottom = fromTop ? b.top + pb.height : b.bottom;
+      if (right > x0 && left < x1 && bottom > y0 && top < y1) continue;
+      if (left < 0 || top < 0 || right > innerWidth || bottom > innerHeight) continue;
+      el.style.maxWidth = probe.style.maxWidth;
+      probe.remove();
+      return;
+    }
+  }
+  probe.remove();
+  el.dataset.at = was;
+  el.style.maxWidth = '';
+}
 function say(text, secs = 2.6, hint = false) {
   note = text ? { text, until: t + secs, hint } : null;
   ui();
@@ -1028,6 +1188,7 @@ function endMove(i, from, before) {
       best[levelIndex] = Math.max(before, starsFor(moves));
       gained = best[levelIndex] - before;
       fresh = earned(starTotal()).filter((id) => !had.includes(id));
+      flow = !!L.warmup && !before && levelIndex + 1 < LIST.length;
       try {
         store.setItem('bd3.reached', String(reached));
         store.setItem('bd3.stars', JSON.stringify(best));
@@ -1320,7 +1481,10 @@ function updateCrate(c, i, dt) {
   c.tiltZ += (clamp(-c.vel.x * lean, -0.18, 0.18) - c.tiltZ) * Math.min(1, dt * 12);
   c.tiltX += (clamp(c.vel.z * lean, -0.18, 0.18) - c.tiltX) * Math.min(1, dt * 12);
   c.group.position.set(c.cur.x, 0, c.cur.z);
-  c.body.position.y = c.lift;
+  // a heavy crate shown as the level starts (step(), wayQueue): a nudge to and fro along its skids, the one way it moves (its
+  // arrows on the ground often lie under the crates next to it on a full board)
+  const na = c.nudgeAt != null ? t - c.nudgeAt : 9, nudge = na < 1.3 ? Math.sin(na * Math.PI * 3) * 0.18 * Math.min(1, na / 0.15) * Math.min(1, (1.3 - na) / 0.3) : 0;
+  c.body.position.set(c.b.axis === 'x' ? nudge : 0, c.lift, c.b.axis === 'y' ? nudge : 0);
   c.body.rotation.set(c.tiltX, Math.sin(t * 40) * 0.05 * c.jig, c.tiltZ);
   // a key crate's gold key glints now and then (each its own beat)
   if (c.keyGold) c.keyGold.emissiveIntensity = 0.3 + 1.1 * Math.max(0, Math.sin(t * 1.6 + i * 2.1)) ** 10;
@@ -1589,7 +1753,9 @@ function ui() {
   // (the countdowns to bedtime and to a crew back late live in Ember's answers since 2026-11-07, Oleg: "not displayed
   // constantly but when the user uses the assistant"; the gates still carry their numbers)
   // (nothing in the bubble under a card: "Show me"'s caption stuck out behind the "Your turn?" card, playtest 2026-11-09, Maya)
-  bubble.set($('card').classList.contains('on') ? '' : note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : L.warmup && moves === 0 ? 'Drag a crate out through the gate of its colour' : lesson() && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : L.warmup && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '');
+  bubbleLine = $('card').classList.contains('on') ? '' : note ? note.text : watching() ? (showing ? `The way in ${L.par} moves: move ${Math.min(moves + 1, L.par)} of ${L.par}` : '') : L.warmup && moves === 0 ? 'Drag a crate out through the gate of its colour' : lesson() && !turnedOnce && state === 'play' && cornerMove() ? 'One drag can turn corners: still one move' : lesson() && levelIndex === 1 && moves < 2 && state === 'play' ? 'Some crates are in the way: move them aside first' : L.warmup && moves <= 2 && state === 'play' ? 'One drag is one move: fewer moves, more stars' : '';
+  bubble.set(bubbleLine);
+  placeBubble();
   if (weather) $('weather').textContent = WEATHER_LABEL[weather.kind()];
   const hb = $('hintBtn');
   hb.hidden = watchUrl || cover || q.has('proto') || state !== 'play' || $('card').classList.contains('on');
@@ -1631,8 +1797,9 @@ let bedtimePic = null;
 // (each title follows "Level N: "; the warm-up, level 1, teaches by doing: no card)
 const INTRO = [
   null,
-  // (the old level 1, after the warm-up: crates to put aside and two moves to spare)
-  { title: 'make room', rule: '<b>Some crates are in the way:</b> move them aside first. Fewer moves to spare before dark.', pic: 'rocks' },
+  // (the old level 1, after the warm-up: crates to put aside; no card since 2026-11-12, the warm-up flows into it and its
+  // rule is a tip, ui())
+  null,
   { title: 'bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
   { title: 'two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
   // (it taught dragging round corners, which level 1 already needs: playtest 2026-11-09, Leo, Maya)
@@ -1740,12 +1907,22 @@ function showCard() {
       // a level played again from the trail: on to where the player had got to, not the level after this one (playtest
       // 2026-11-07, Maya: after replaying level 1, "Next level" took her to level 2 when she was on level 12)
       const furthest = Math.min(reached, LIST.length - 1), ahead = !q.has('proto') && furthest > levelIndex + 1;
+      // the warm-up's first win: "Next level" alone, filling up until it goes on by itself (flow)
+      if (flow) {
+        button('Next level', () => busy(() => goTo(levelIndex + 1)));
+        const b = $('cardBtns').lastChild;
+        b.classList.add('auto');
+        b.style.setProperty('--fill', `${FLOW_SECS}s`);
+        flowAt = t + FLOW_SECS;
+      }
       // (instead of "Next level": three buttons do not fit a phone's card; the trail, behind the star, has every level)
-      if (ahead) button(`Back to level ${furthest + 1}`, () => busy(() => goTo(furthest)));
+      else if (ahead) button(`Back to level ${furthest + 1}`, () => busy(() => goTo(furthest)));
       else if (!last) button('Next level', () => busy(() => goTo(levelIndex + 1)));
-      button('Play again', () => busy(load), !last);
-      if (stars < 3) button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
-      if (last) button('Camp trail', openTrail, true);
+      if (!flow) {
+        button('Play again', () => busy(load), !last);
+        if (stars < 3) button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
+        if (last) button('Camp trail', openTrail, true);
+      }
     }
   } else if (lostTo !== null) {
     $('cardTitle').textContent = 'Gone to bed';
@@ -1882,6 +2059,18 @@ function step(dt) {
   board.mark(drag && !watching() ? [...settleSpot(), L.blocks[drag.i].w, L.blocks[drag.i].h] : null);
   if (aimed && (state !== 'play' || posKey(pos) !== aimed.key)) aimed = null;
   board.aim(aimed && !watching() ? [aimed.m.to[0], aimed.m.to[1], L.blocks[aimed.m.i].w, L.blocks[aimed.m.i].h] : null);
+  // a level with heavy crates shows each one's way in turn as it starts, once its card is closed (playtest 2026-11-10: Aisha
+  // on both builds, Gary on the old one told a heavy crate from the others only when a drag failed; the skids hardly show
+  // from above)
+  if (wayQueue && state === 'play' && !watching() && !$('intro').classList.contains('on')) {
+    wayQueue.at ??= t + 0.6;
+    if (t >= wayQueue.at && (blinkI < 0 || t - blinkAt > 2)) {
+      blinkI = wayQueue.list.shift();
+      blinkAt = t;
+      if (crates[blinkI]) crates[blinkI].nudgeAt = t;
+      if (!wayQueue.list.length) wayQueue = null;
+    }
+  }
   const wc = blinkI >= 0 && crates[blinkI] && !crates[blinkI].gone && !crates[blinkI].out ? crates[blinkI] : null;
   board.way(wc ? { x: wc.cur.x, z: wc.cur.z, w: wc.b.w, h: wc.b.h, axis: wc.b.axis === 'x' ? 'x' : 'z', age: t - blinkAt } : null);
   board.tick(dt, t, drag ? L.blocks[drag.i].color : teach(dt));
@@ -1909,7 +2098,11 @@ function step(dt) {
   }
   // a win that earned the camp something new: the camera goes to it first, it pops up, a note names it; then the card
   // (playtest 2026-11-07, Jonas, Dan, Leo: the card covered the part of the camp where it appeared, so they missed it)
-  if (endAt && t >= endAt && state === 'won' && !showing && !watchUrl && fresh.length && !spotlit) {
+  if (flowAt && t >= flowAt && state === 'won') {
+    flowAt = 0;
+    busy(() => goTo(levelIndex + 1));
+  }
+  if (endAt && t >= endAt && state === 'won' && !showing && !watchUrl && fresh.length && !spotlit && !flow) {
     spotlight();
     endAt = t + 2.8;
   } else if (endAt && t >= endAt) {
@@ -1927,6 +2120,13 @@ function step(dt) {
     u.d += (u.to.d - u.d) * k;
     u.dir.lerp(u.to.dir, k).normalize();
   }
+  aimCamera();
+}
+// the camera where its frame puts it (step(); and ?playtest's look, whose clock stands still: a tester's first look at a
+// level came before the camera had been placed, and the board then jumped once the first move ran the clock, playtest
+// 2026-11-10, Maya and Leo, "the board shifts under the thumb"; a player's screen never showed it, its frames step first)
+function aimCamera() {
+  const u = camera.userData;
   camera.position.copy(u.look).addScaledVector(u.dir, u.d);
   camera.position.x += Math.sin(t * 0.21) * 0.06;
   camera.position.y += Math.sin(t * 0.17) * 0.04;
@@ -1934,24 +2134,71 @@ function step(dt) {
 }
 
 let last = performance.now();
-// a phone (world.js LOW): the sun's shadows redrawn every other frame (every frame while a crate is in hand, so its shadow
-// keeps up), and if it still runs under about 36 frames a second over two seconds of play, one pixel per point from then on
-let shadowTick = 0;
+// How heavy the picture is (2026-11-11: level 1 is about 4 ms of graphics-card work a frame on Oleg's RTX 2060, so a school
+// laptop's chip, about a tenth of that on paper, would run it near 30 frames a second):
+// 0  the full look;
+// 1  lighter shadows: a smaller map (1024), redrawn every other frame (every frame while a crate is in hand, so its shadow
+//    keeps up), and the plain soft edge from the next level set-up on (that change compiles the shaders again, which the
+//    set-up's spinner covers);
+// 2  one pixel per point.
+// Phones start at 1 (world.js LOW). Any screen steps down once two seconds of play run under about 40 frames a second, and
+// never back up. ?quality=0|1|2 fixes the step (checks).
+let shadowTick = 0, tidyTick = 0;
 const pace = { n: 0, sum: 0 };
+const forcedQuality = q.has('quality') ? clamp(Number(q.get('quality')) || 0, 0, 2) : null;
+const lite = { step: LOW ? 1 : 0, alternate: LOW, typePending: false };
+function lighten(to) {
+  while (lite.step < to) {
+    lite.step++;
+    if (lite.step === 1) {
+      world.lighterShadows();
+      lite.alternate = lite.typePending = true;
+    }
+    if (lite.step === 2 && renderer.getPixelRatio() > 1) {
+      renderer.setPixelRatio(1);
+      resize();
+    }
+  }
+}
+// the plain soft edge (step 1): every material compiled again for the new shadow kind (load() calls this while it sets up)
+function settleShadowType() {
+  if (!lite.typePending) return;
+  lite.typePending = false;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
+  scene.traverse((o) => {
+    for (const m of Array.isArray(o.material) ? o.material : o.material ? [o.material] : []) m.needsUpdate = true;
+  });
+}
+if (forcedQuality != null) lighten(forcedQuality);
+// Tiny things cast no shadow (2026-11-11): a full camp had 594 shadow casters, each a draw call in the sun's pass, and about
+// 150 were under 10 cm across (nails, ropes, small props, birds), their shadows a few pixels. A mesh whose own size (its
+// geometry by its own scale, not its parents', so a scaled-down model keeps its shadow) is under 6 cm in radius stops
+// casting; animated people keep theirs. New camp pieces are looked at as they come (frame(), every half second).
+const TINY = 0.06;
+function tidyShadows() {
+  scene.traverse((o) => {
+    if (!o.isMesh || !o.castShadow || o.isSkinnedMesh || o.userData.shadowSized) return;
+    o.userData.shadowSized = true;
+    const g = o.geometry;
+    if (!g.boundingSphere) g.computeBoundingSphere();
+    if (g.boundingSphere.radius * Math.max(o.scale.x, o.scale.y, o.scale.z) < TINY) o.castShadow = false;
+  });
+}
 function frame(now) {
   const raw = now - last, dt = Math.min(raw / 1000, 0.05);
   last = now;
   if (document.visibilityState === 'visible' && !playtest) step(dt);
-  if (LOW) renderer.shadowMap.autoUpdate = !!drag || (++shadowTick & 1) === 0;
+  if (++tidyTick % 30 === 0) {
+    tidyShadows();
+    placeBubble();
+  }
+  if (lite.alternate) renderer.shadowMap.autoUpdate = !!drag || (++shadowTick & 1) === 0;
   renderer.render(scene, camera);
   renderer.shadowMap.autoUpdate = true;
-  if (LOW && !playtest && renderer.getPixelRatio() > 1 && document.visibilityState === 'visible' && state === 'play' && raw < 200) {
+  if (forcedQuality == null && lite.step < 2 && !playtest && !film && !cover && !busyNow && document.visibilityState === 'visible' && state === 'play' && raw < 200) {
     pace.sum += raw;
     if (++pace.n >= 120) {
-      if (pace.sum / pace.n > 28) {
-        renderer.setPixelRatio(1);
-        resize();
-      }
+      if (pace.sum / pace.n > 25) lighten(lite.step + 1);
       pace.n = pace.sum = 0;
     }
   }
@@ -2024,6 +2271,7 @@ if (playtest) {
       return `tapped ${el.closest('button') ? 'a button' : el.tagName.toLowerCase()}`;
     },
     async look(name) {
+      aimCamera();
       renderer.render(scene, camera);
       // the page's own animations and fades (the card, its stars popping) run on the screen's frames, which a background tab
       // doesn't get: finished, as a player looking a moment later would see them
@@ -2223,6 +2471,64 @@ window.BD3 = {
     return { color, hinge: [d.hinge.x, d.hinge.z], open: tip(d.open), shut: tip(d.shut) };
   }),
   blocks: () => L.blocks, level: () => L, drag: () => drag && { ...drag, occ: undefined, before: undefined }, crates: () => crates.map((c) => ({ x: c.cur.x - board.ox - c.b.w / 2, y: c.cur.z - board.oz - c.b.h / 2, gone: c.gone, out: !!c.out })), step, scene, camera, renderer,
+  // what a frame costs (2026-11-11, CPU and memory work): draw calls and triangles, what casts shadows, the graphics card's
+  // geometries and textures, the page's memory, and the time to make a frame: the CPU's part (handing the frame to the card)
+  // and the whole of it (waiting for the card to finish), averaged over `frames` frames run straight through; gpuMs: the
+  // card's own time per frame where the browser has its timer (EXT_disjoint_timer_query_webgl2), the number that matters for
+  // a weak laptop's chip
+  async perf(frames = 120) {
+    let meshes = 0, casters = 0, skinned = 0;
+    scene.traverse((o) => {
+      if (!o.isMesh || !o.visible) return;
+      meshes++;
+      if (o.castShadow) casters++;
+      if (o.isSkinnedMesh) skinned++;
+    });
+    const info = renderer.info, gl = renderer.getContext(), px = new Uint8Array(4), wait = () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    info.autoReset = false;
+    info.reset();
+    renderer.render(scene, camera);
+    const calls = info.render.calls, triangles = info.render.triangles;
+    info.autoReset = true;
+    const time = (f) => {
+      const a = performance.now();
+      for (let k = 0; k < frames; k++) f();
+      return +((performance.now() - a) / frames).toFixed(2);
+    };
+    wait();
+    const cpuMs = time(() => renderer.render(scene, camera));
+    wait();
+    const frameMs = time(() => {
+      step(1 / 60);
+      if (lite.alternate) renderer.shadowMap.autoUpdate = (++shadowTick & 1) === 0;
+      renderer.render(scene, camera);
+      renderer.shadowMap.autoUpdate = true;
+      wait();
+    });
+    let gpuMs = null;
+    const timer = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    if (timer) {
+      const qs = [];
+      for (let k = 0; k < Math.min(frames, 60); k++) {
+        const qq = gl.createQuery();
+        gl.beginQuery(timer.TIME_ELAPSED_EXT, qq);
+        step(1 / 60);
+        if (lite.alternate) renderer.shadowMap.autoUpdate = (++shadowTick & 1) === 0;
+        renderer.render(scene, camera);
+        renderer.shadowMap.autoUpdate = true;
+        gl.endQuery(timer.TIME_ELAPSED_EXT);
+        qs.push(qq);
+      }
+      for (let k = 0; k < 50 && !gl.getQueryParameter(qs[qs.length - 1], gl.QUERY_RESULT_AVAILABLE); k++) await new Promise((r) => setTimeout(r, 20));
+      if (!gl.getParameter(timer.GPU_DISJOINT_EXT)) {
+        const ns = qs.map((qq) => gl.getQueryParameter(qq, gl.QUERY_RESULT_AVAILABLE) ? gl.getQueryParameter(qq, gl.QUERY_RESULT) : null).filter((x) => x != null);
+        if (ns.length) gpuMs = +(ns.reduce((s, x) => s + x, 0) / ns.length / 1e6).toFixed(2);
+      }
+      for (const qq of qs) gl.deleteQuery(qq);
+    }
+    return { level: levelIndex + 1, calls, triangles, meshes, casters, skinned, geometries: info.memory.geometries, textures: info.memory.textures, programs: info.programs.length,
+      heapMB: performance.memory ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(1) : null, cpuMs, frameMs, gpuMs, size: [canvas.width, canvas.height], quality: lite.step };
+  },
 };
 
 await loadModels();

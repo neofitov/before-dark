@@ -108,7 +108,16 @@ export function makeWorld(canvas) {
     clearing.scale.set(Math.max(hx, hz) * 1.25 + 1, Math.max(hx, hz) + 1, 1);
   }
 
-  return { renderer, scene, camera, sun, hemi, setEvening, fitArea, fitFog, sky };
+  // lighter shadows for a screen that falls behind (main.js lighten): a smaller map, made anew at the next frame
+  function lighterShadows() {
+    sun.shadow.mapSize.set(1024, 1024);
+    if (sun.shadow.map) {
+      sun.shadow.map.dispose();
+      sun.shadow.map = null;
+    }
+  }
+
+  return { renderer, scene, camera, sun, hemi, setEvening, fitArea, fitFog, sky, lighterShadows };
 }
 
 // ---- the Quaternius plants: one shared material per texture, leaves cut out of their cards and swaying ----
@@ -165,7 +174,12 @@ export function swaying(m, k) {
 // crown) would reach in.
 // What was planted is kept in `userData.items` ({ name, x, z, r }) for checks.
 export function plantForest(scene, models, hx, hz, seed = 7, keepOut = []) {
-  const r = rng(seed), near = new THREE.Group(), far = new THREE.Group();
+  // three kinds of ground, merged apart (2026-11-11, CPU and memory work): the near ring of trees and bushes, which casts
+  // shadows into the clearing; the ground cover (grass, flowers, mushrooms, pebbles), whose shadows were 50k triangles of the
+  // sun's work and hardly showed; and the far trees, in six slices round the clearing, so a slice off the screen is not drawn
+  // (on a computer's wide frame about half the trees stood off it, drawn all the same as one mesh)
+  const r = rng(seed), near = new THREE.Group(), low = new THREE.Group(), FAR = 6, far = Array.from({ length: FAR }, () => new THREE.Group());
+  const farAt = (x, z) => far[Math.floor(((Math.atan2(z, x) + Math.PI) / (Math.PI * 2)) * FAR) % FAR];
   let group = near;
   const trees = [['CommonTree_3', 3.6, 5.2], ['CommonTree_4', 3.8, 5.6], ['CommonTree_5', 3.4, 4.8], ['Pine_1', 3.8, 5.6], ['Pine_4', 4.4, 6.2], ['Pine_5', 3.6, 5], ['TwistedTree_3', 3.6, 4.4]];
   const shrubs = [['Bush_Common', 0.7, 1.1], ['Bush_Common_Flowers', 0.7, 1.1], ['Fern_1', 0.45, 0.7], ['Rock_Medium_1', 0.4, 0.7], ['Rock_Medium_2', 0.35, 0.6], ['Plant_1', 0.5, 0.8], ['stump_old', 0.25, 0.35]];
@@ -199,7 +213,7 @@ export function plantForest(scene, models, hx, hz, seed = 7, keepOut = []) {
   for (let k = 0; k < 110; k++) {
     const [x, z] = ring(2, 1.5);
     if (inside(x, z, 1.7) || (z > 0 && inside(x, z, 9))) continue;   // none close in front: they would hide the board
-    group = inside(x, z, 4.5) ? near : far;
+    group = inside(x, z, 4.5) ? near : farAt(x, z);
     const maple = maples < 3 && z < 0 && r.next() < 0.12;
     if (maple) maples++;
     place(maple ? trees[6] : trees[r.int(6)], x, z);
@@ -210,14 +224,15 @@ export function plantForest(scene, models, hx, hz, seed = 7, keepOut = []) {
     if (inside(x, z, 0.8)) continue;
     place(r.pick(shrubs), x, z);
   }
+  group = low;
   for (let k = 0; k < 300; k++) {
     const [x, z] = ring(0.35, 0.75);
     if (inside(x, z, 0.3)) continue;
     place(r.pick(ground), x, z);
   }
-  const out = new THREE.Group(), merged = mergeStatic(near), back = mergeStatic(far);
-  back.traverse((m) => m.isMesh && (m.castShadow = false));
-  out.add(merged, back);
+  const out = new THREE.Group(), merged = mergeStatic(near), cover = mergeStatic(low), backs = far.map(mergeStatic);
+  for (const g of [cover, ...backs]) g.traverse((m) => m.isMesh && (m.castShadow = false));
+  out.add(merged, cover, ...backs);
   out.userData.items = items;
   scene.add(out);
   return out;

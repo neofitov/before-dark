@@ -1174,7 +1174,8 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     cheer: () => Object.values(workers).forEach((w) => (w.cheer = 2.4)),
     fireSize: () => Object.values(sites).find((s) => s.fire)?.fire.size || 0,
     extent: () => [...Object.values(sites).flatMap((s) => [s.pos.clone().addScaledVector(s.r, 1.2).addScaledVector(s.f, -0.9), s.pos.clone().addScaledVector(s.r, -1.2).addScaledVector(s.f, -0.9), s.pos.clone().addScaledVector(s.f, 1.2)]), ...extras.extent()],
-    dispose: () => world.remove(...added),
+    // off the scene; what went (main.js frees what nothing else uses: free.js)
+    dispose: () => (world.remove(...added), added),
     // for checks: how far what stands at each site reaches, in its frame (across its right, towards the board), against its
     // PLAN (tools/check-camp.js)
     reach: () => Object.fromEntries(Object.entries(sites).map(([color, site]) => {
