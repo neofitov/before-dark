@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0d1322">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -10,8 +11,9 @@
   <!-- the 3D art slice: one level in the full look (three.js r170, MIT, in vendor/three; nothing loads from outside) -->
   <script>
     // ?playtest and ?silent (simulated players and checks, in the browser on Oleg's PC) make no sound at all: sound.js stays
-    // quiet there, and nothing else can start audio either
-    if (/[?&](playtest|silent)\b/.test(location.search)) {
+    // quiet there, and nothing else can start audio either; but ?audible (QA's live sound tap, 2026-11-14, Oleg: "you can
+    // unmute the tabs ... that rule is not applied to the sound qa") plays it
+    if (/[?&](playtest|silent)\b/.test(location.search) && !/[?&]audible\b/.test(location.search)) {
       window.AudioContext = window.webkitAudioContext = undefined;
       HTMLMediaElement.prototype.play = function () {
         this.muted = true;
@@ -152,6 +154,7 @@
     #card .wait, #intro .wait { display: block; margin: 8px auto 0; padding: 4px 12px; border: 0; background: none; color: rgba(255, 255, 255, 0.72);
       font: 700 14px system-ui, sans-serif; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
     #card .wait[hidden], #intro .wait[hidden] { display: none; }
+    #card .wait.held, #intro .wait.held { pointer-events: none; opacity: 0.6; text-decoration: none; }
     #card button.auto::before, #intro .go.auto::before { content: ''; position: absolute; inset: 0; background: rgba(255, 255, 255, 0.28); transform-origin: left;
       transform: scaleX(0); animation: autoFill var(--fill, 3s) linear forwards; }
     @keyframes autoFill { to { transform: scaleX(1); } }
@@ -217,9 +220,20 @@
       background: linear-gradient(#2c4a24, #18301b); box-shadow: 0 14px 44px rgba(0, 0, 0, 0.55), inset 0 0 0 2px rgba(255, 255, 255, 0.07); }
     #map .top { display: flex; align-items: center; gap: 10px; }
     #map h2 { margin: 0; font-size: 22px; flex: 1; }
-    #map .total { font-weight: 800; font-size: 18px; color: #ffd24a; background: rgba(0, 0, 0, 0.28); padding: 6px 13px; border-radius: 999px; }
-    #map .total span { color: rgba(255, 255, 255, 0.6); font-size: 14px; }
     #map .x { width: 38px; height: 38px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.28); color: #fff; font-size: 16px; cursor: pointer; }
+    #map .tabs { display: flex; gap: 4px; margin: 10px 0 4px; padding: 4px; border-radius: 999px; background: rgba(0, 0, 0, 0.3); }
+    #map .tabs button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 999px; padding: 8px 8px;
+      font: 800 16px system-ui, sans-serif; color: rgba(255, 255, 255, 0.72); background: none; cursor: pointer; white-space: nowrap; }
+    #map .tabs .st { color: #ffd24a; font-size: 18px; }
+    #map .tabs b { color: #ffd24a; }
+    #map .tabs small { color: rgba(255, 255, 255, 0.5); font-size: 13px; margin-left: -3px; }
+    #map .tabs button.on { color: #fff; background: rgba(255, 255, 255, 0.17); box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.2); }
+    #map .tabs #tabShop.can:not(.on) { animation: tabCall 1.6s ease-in-out infinite; }
+    @keyframes tabCall { 50% { background: rgba(255, 210, 74, 0.28); box-shadow: inset 0 0 0 1.5px #ffd24a; } }
+    #map .shopPane, #map.shop .trailPane { display: none; }
+    #map.shop .shopPane { display: block; }
+    /* the shop: wood, not the trail's forest green */
+    #map.shop .sheet { background: linear-gradient(#6a4526, #3e2614); }
     #map .trail { position: relative; margin: 10px 0 4px; min-height: 100px; }
     #map .trail > svg { position: absolute; inset: 0; }
     #map .trail path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
@@ -240,19 +254,60 @@
     #map .next .bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #ffc46a, #ffe08a); }
     #map .extras { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
     /* the camp shop (shop.js, 2026-11-14): a tile per thing; what the coins buy now lit and pressable, its price on it */
-    #map .shopHead { display: flex; align-items: center; gap: 10px; }
-    #map .purse { display: inline-flex; align-items: center; gap: 5px; font-size: 16px; color: #ffd24a; background: rgba(0, 0, 0, 0.28); padding: 3px 11px 3px 6px; border-radius: 999px; }
     #map .ex { background: rgba(0, 0, 0, 0.24); border: 0; border-radius: 14px; padding: 7px 3px 6px; text-align: center; font: 700 12px/1.25 system-ui, sans-serif; color: #fff; }
     #map .ex > svg, #map .ex > img { display: block; margin: 0 auto 3px; }
     #map .ex .cost { color: #ffd24a; font-size: 11px; display: flex; align-items: center; justify-content: center; gap: 3px; }
     #map .ex.no { color: rgba(255, 255, 255, 0.55); }
     #map .ex.no > svg, #map .ex.no > img { filter: grayscale(1) brightness(0.75); opacity: 0.6; }
     #map .ex.has .cost { color: #a8e08a; }
-    #map .ex.can { background: linear-gradient(#5aa84a, #3e8a34); box-shadow: 0 3px 0 #2c6a24; cursor: pointer; }
-    #map .ex.can:hover { filter: brightness(1.08); }
-    #map .ex.can:active { transform: translateY(2px); box-shadow: 0 1px 0 #2c6a24; }
-    #map .ex.can .cost { color: #fff2b0; }
-    #map .ex.next:not(.can) { box-shadow: inset 0 0 0 2px #ffd24a; color: #fff; }
+    /* what the coins buy: a lighter tile with its price lit (the Buy is the shown thing's, at the top) */
+    #map .ex.can { background: rgba(255, 236, 190, 0.16); }
+    #map .ex.can .cost { color: #ffd24a; font-weight: 800; }
+    #map .ex:hover { filter: brightness(1.1); }
+    #map .ex:active { transform: translateY(1px); }
+    #map .ex { cursor: pointer; }
+    #map .ex.sel { box-shadow: inset 0 0 0 2.5px #fff, 0 0 12px rgba(255, 255, 255, 0.35); }
+    /* the upgrades (2026-11-14): a dot for each tier, the bought ones lit; a line the levels have not got to yet, greyed with a lock */
+    #map .dots { display: flex; justify-content: center; gap: 3px; margin: 2px 0 1px; }
+    #map .dots i { width: 7px; height: 7px; border-radius: 50%; background: rgba(255, 255, 255, 0.22); }
+    #map .dots i.on { background: #ffd24a; box-shadow: 0 0 4px rgba(255, 210, 74, 0.7); }
+    #map .ex.locked { color: rgba(255, 255, 255, 0.45); }
+    #map .ex.locked > img, #map .ex.locked > svg { filter: grayscale(1) brightness(0.6); opacity: 0.5; }
+    #map .ex.locked .cost { color: rgba(255, 255, 255, 0.55); }
+    #map .feature .tierline { display: flex; align-items: center; gap: 6px; font-size: 12px; color: rgba(255, 255, 255, 0.7); }
+    #map .feature .tierline .dots { margin: 0; justify-content: flex-start; }
+    #map .feature .buyBtn.out { background: linear-gradient(#6aa0d8, #3e74b0); box-shadow: 0 3px 0 #2a5080; animation: none; }
+    /* the thing shown big at the top of the shop, with its Buy (iPhone test 2026-11-14) */
+    #map .feature { display: flex; align-items: center; gap: 14px; margin: 10px 0 12px; padding: 12px; border-radius: 18px; text-align: left;
+      background: rgba(0, 0, 0, 0.3); box-shadow: inset 0 0 0 1.5px rgba(255, 210, 74, 0.35); }
+    #map .feature .pic { flex: none; width: 104px; height: 104px; border-radius: 16px; display: grid; place-items: center;
+      background: radial-gradient(circle at 50% 42%, rgba(255, 228, 150, 0.4), rgba(255, 255, 255, 0.06) 70%); }
+    #map .feature .info { flex: 1; min-width: 0; display: grid; gap: 5px; justify-items: start; }
+    #map .feature .name { font-size: 21px; font-weight: 800; }
+    #map .feature .blurb { font-size: 13px; line-height: 1.3; color: rgba(255, 255, 255, 0.8); }
+    #map .feature .owned { font-weight: 800; color: #a8e08a; }
+    #map .feature .need { display: flex; align-items: center; gap: 4px; font-size: 14px; color: #ffe7a8; }
+    #map .feature .need b { color: #fff; }
+    #map .feature .bar { width: 100%; height: 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.35); overflow: hidden; }
+    #map .feature .bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #ffc46a, #ffe08a); }
+    #map .feature .buyBtn { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; border: 0; border-radius: 14px; padding: 11px 18px;
+      font: 800 17px system-ui, sans-serif; color: #fff; background: linear-gradient(#62c04e, #3e9a34); box-shadow: 0 3px 0 #2c6a24; cursor: pointer;
+      animation: buyCall 1.6s ease-in-out infinite; }
+    @keyframes buyCall { 50% { box-shadow: 0 3px 0 #2c6a24, 0 0 16px 3px rgba(127, 208, 106, 0.6); } }
+    #map .feature .buyBtn:active { transform: translateY(2px); box-shadow: 0 1px 0 #2c6a24; }
+    #map .feature .buyBtn:disabled { animation: none; filter: saturate(0.6); }
+    /* bought: the coins fly into the picture, it pops with a gold ring */
+    #map .feature.got .pic { animation: gotPop 0.7s cubic-bezier(.2, 1.8, .4, 1); box-shadow: 0 0 0 3px #ffd24a, 0 0 34px 6px rgba(255, 210, 74, 0.75); }
+    @keyframes gotPop { 35% { transform: scale(1.25) rotate(-4deg); } 70% { transform: scale(0.96); } }
+    #map .feature.got .name::after { content: ' is yours!'; color: #ffd24a; }
+    .flyer.coin { z-index: 40; margin: -11px 0 0 -11px; font-size: 0; transition: transform 0.5s cubic-bezier(.45, 0, .6, 1), opacity 0.5s; }
+    @media (max-width: 400px) {
+      #map .feature { gap: 10px; padding: 10px; }
+      #map .feature .pic { width: 84px; height: 84px; }
+      #map .feature .pic img { width: 78px; height: 78px; }
+      #map .feature .name { font-size: 18px; }
+      #map .tabs button { font-size: 15px; gap: 4px; }
+    }
     /* the win card's shop strip (2026-11-14, Oleg: the coin line "looks like a tooltip"): the coins won, the best thing they
        buy with its picture and a Buy, or the next thing with how far off it is */
     #cardExtra .shopStrip { display: flex; align-items: center; gap: 10px; margin: 2px auto 0; padding: 7px 8px 7px 7px; max-width: 330px; text-align: left;
@@ -280,11 +335,8 @@
     @keyframes coinCall { 50% { box-shadow: 0 0 0 2px #ffe08a, 0 0 18px 4px rgba(255, 210, 74, 0.75); transform: scale(1.06); } }
     #map .go { display: block; margin: 14px auto 0; border: 0; border-radius: 14px; padding: 13px 30px; font-size: 18px; font-weight: 800; color: #fff; cursor: pointer;
       background: linear-gradient(#5cc753, #3e9e38); box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.2); }
-    /* a wide screen: the trail beside the extras */
-    @media (orientation: landscape) and (min-width: 700px) {
-      #map .sheet { width: min(900px, 100%); }
-      #map .cols { display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; align-items: start; }
-    }
+    /* the trail's Play button stays in sight at the sheet's foot however far the trail scrolls (QA 2026-11-14, PROGRESS-1) */
+    #map .trailPane .go { position: sticky; bottom: 0; z-index: 2; box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.2), 0 4px 16px rgba(0, 0, 0, 0.45); }
     #card { z-index: 10; }
     #pills { position: fixed; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; }
     #pills button { border: 0; border-radius: 999px; padding: 7px 12px;
@@ -295,7 +347,19 @@
       #hud .btn.pill.coins { position: absolute; right: 12px; top: calc(max(10px, env(safe-area-inset-top)) + 46px); pointer-events: auto; }
     }
     @media (max-width: 420px) { #level { font-size: 17px; } #moves { font-size: 14px; } .btn { width: 40px; height: 40px; }
-      .btn.lab { width: 46px; height: 48px; font-size: 19px; } .btn.lab small { font-size: 10px; } #best { font-size: 15px; padding: 2px 10px 3px; } }
+      .btn.lab { width: 46px; height: 48px; font-size: 19px; } .btn.lab small { font-size: 11px; } #best { font-size: 15px; padding: 2px 10px 3px; } }
+    /* a small phone (360 px): the HUD's row a little tighter, or the gear ran 6 px off the right edge (QA 2026-11-14, UI-2) */
+    @media (max-width: 370px) {
+      #hud { padding-left: 8px; padding-right: 8px; }
+      #hud .btns { gap: 5px; }
+      .btn.lab { width: 42px; }
+      .btn.pill { padding: 0 9px 0 8px; }
+      #hud .btn.pill.coins { right: 8px; }
+      #hud #moves { font-size: 12px; }
+      #hud #moves .sun { display: none; }   /* (with two-digit stars it was 17 px off: QA UI-2) */
+      #gear { width: 38px; }
+      #hud .btn.lab { width: 40px; }
+    }
     /* a phone: one line each for the moves, the hint and the end card's buttons (playtest 2026-10-29, Maya at 390 px:
        "13 moves before / dark", the hint and "Next / level" wrapped) */
     @media (max-width: 400px) {
@@ -402,14 +466,20 @@
     <button id="setRestart">Restart level <span>↺</span></button>
     <button class="go" id="setClose">Back to the game</button>
   </div></div>
-  <!-- the camp trail: the level map with the stars and the camp's extras (main.js openTrail, trail.js) -->
+  <!-- the camp trail and the camp shop: two tabs of one panel (main.js openTrail/openShop, trail.js). The shop opens on its own
+       tab from the coins and the win card (iPhone test 2026-11-14, Oleg: "clicking on shop takes you to the camp map") -->
   <div id="map"><div class="sheet">
-    <div class="top"><h2>Camp trail</h2><div class="total">★ <b id="mapTotal">0</b><span> / <span id="mapMax">0</span></span></div><button class="x" id="mapClose" title="Close">✕</button></div>
-    <div class="cols">
+    <div class="top"><h2 id="mapTitle">Camp trail</h2><button class="x" id="mapClose" title="Close">✕</button></div>
+    <div class="tabs"><button id="tabTrail"><span class="st">★</span>Trail <b id="mapTotal">0</b><small>/<span id="mapMax">0</span></small></button><button id="tabShop"><svg class="coin" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#e9a72a"/><circle cx="10" cy="10" r="7" fill="#ffd24a"/><path d="M10 5.5l1.3 2.9 3.1.3-2.4 2 .7 3.1L10 12.2l-2.7 1.6.7-3.1-2.4-2 3.1-.3z" fill="#e9a72a"/></svg>Shop <b id="mapCoins">0</b></button></div>
+    <div class="trailPane">
       <div class="trail" id="mapTrail"></div>
-      <div><h3 class="shopHead">Camp shop <span class="purse"><svg class="coin" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#e9a72a"/><circle cx="10" cy="10" r="7" fill="#ffd24a"/><path d="M10 5.5l1.3 2.9 3.1.3-2.4 2 .7 3.1L10 12.2l-2.7 1.6.7-3.1-2.4-2 3.1-.3z" fill="#e9a72a"/></svg><b id="mapCoins">0</b></span></h3><div class="next" id="mapNext"></div><div class="extras" id="mapExtras"></div></div>
+      <button class="go" id="mapPlay">Play</button>
     </div>
-    <button class="go" id="mapPlay">Play</button>
+    <div class="shopPane">
+      <div class="feature" id="shopFeature"></div>
+      <div class="extras" id="mapExtras"></div>
+      <button class="go" id="shopDone">Back to the game</button>
+    </div>
   </div></div>
   <div id="busy"><div class="box"><i></i><span>Setting up camp…</span></div></div>
   <div id="rotate">

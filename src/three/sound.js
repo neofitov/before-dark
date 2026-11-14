@@ -11,13 +11,51 @@ import { makeMusic, makeTrack } from './music.js';
 // made in code, in the recording's key (D major), in tune (the first strings were up to 15 cents flat: 2026-11-07)
 const TRACK = 'assets/music/camp-piano.mp3', STING = { voice: 'piano', room: 'smooth' };
 
-const FILES = {
+export const FILES = {
   pick: ['pick1', 'pick2', 'pick3'], drop: ['drop1', 'drop2', 'drop3'], heavy: ['heavy1'], bump: ['bump1', 'bump2'],
   cloth: ['cloth1', 'cloth2', 'cloth3', 'cloth4'], coins: ['coins1', 'coins2'], latch: ['latch1'], chop: ['chop1'], leather: ['leather1'],
   stone: ['stone1', 'stone2', 'stone3'], thud: ['thud1', 'thud2', 'thud3'], tap: ['tap1', 'tap2', 'tap3'], plank: ['plank1', 'plank2'],
   soft: ['soft1', 'soft2'], glass: ['glass1'], book: ['book1', 'book2'], click: ['click1'],
 };
 const buf = {};
+// each file measured once decoded (QA's sound role, 2026-11-14: tools/check-sound.js files()): where its sound starts (the
+// cloth and coins files began with 30-50 ms of silence, so a landing or a buy sounded late), its loudness (the variants of
+// one sound were up to 12 dB apart: one hit in four sounded off), so the variants are played from their start and evened
+// out to their group, and each ends on a short fade (the soft files stopped mid-wave, a click)
+const meta = {};
+function stash(n, d) {
+  buf[n] = d;
+  try {
+    const ch = Array.from({ length: d.numberOfChannels }, (_, k) => d.getChannelData(k)), len = d.length, sr = d.sampleRate;
+    let first = 0;
+    while (first < len && ch.every((c) => Math.abs(c[first]) < 0.003)) first++;
+    const w = Math.min(len, Math.round(sr * 0.4)), hop = Math.round(sr * 0.05), sq = new Float64Array(len + 1);
+    for (let i = 0; i < len; i++) sq[i + 1] = sq[i] + ch.reduce((s, c) => s + c[i] * c[i], 0) / ch.length;
+    let loud = 0;
+    for (let i = 0; i + w <= len; i += hop) loud = Math.max(loud, Math.sqrt((sq[i + w] - sq[i]) / w));
+    meta[n] = { lead: Math.max(0, first / sr - 0.002), loud };
+  } catch {}
+}
+// the gain that brings a variant to its group's middle loudness (at most twice or half)
+function evenOut(name, n) {
+  const ls = (FILES[name] || []).map((v) => meta[v]?.loud).filter((x) => x > 0).sort((a, b) => a - b), own = meta[n]?.loud;
+  if (!own || ls.length < 2) return 1;
+  return Math.min(2, Math.max(0.5, ls[Math.floor(ls.length / 2)] / own));
+}
+// QA's live sound tap (tools/check-sound.js live, 2026-11-14): what the speakers get, as a stream to record, and the
+// audio's state (an agent can't hear it: it records it and measures it)
+let tapNode = null;
+export function tap() {
+  if (!ac || !master) return null;
+  if (!tapNode || tapNode.context !== ac) {
+    tapNode = ac.createMediaStreamDestination();
+    master.connect(tapNode);
+  }
+  return tapNode.stream;
+}
+export const audioState = () => ({ made: !!ac, state: ac?.state ?? null, time: ac ? +ac.currentTime.toFixed(2) : null, hidden: document.hidden, muted, musicOff, broken, stale, contexts: made, silentPage: silent });
+// how a file is played (tools/check-sound.js files()): skipped in from its start (s), and its gain
+export const treatment = (name, n) => ({ lead: meta[n]?.lead || 0, gain: evenOut(name, n) });
 // a sound's file, found from this module (so tools' pages load them too)
 const file = (n) => new URL(`../../assets/sfx3d/${n}.mp3`, import.meta.url);
 // Sound and music are switched apart (settings, playtest 2026-10-28: published games all have the two toggles). `out` carries
@@ -71,7 +109,8 @@ export function toggleMute() {
 }
 
 // ?playtest (simulated players, checks) never makes a sound: those tabs run on Oleg's PC
-const silent = /[?&](playtest|silent)\b/.test(location.search);
+// (?audible plays all the same: QA's live sound tap, tools/check-sound.js live)
+const silent = /[?&](playtest|silent)\b/.test(location.search) && !/[?&]audible\b/.test(location.search);
 
 // iPhones lose a page's sound when it goes to the background and comes back (2026-11-09, Oleg, on CrazyGames: the sound gone
 // after minimising the browser, and neither the settings nor a reload brought it back). Every iPhone browser is Safari's
@@ -108,7 +147,7 @@ function makeContext() {
     amb.connect(out);
     for (const list of Object.values(FILES)) {
       for (const n of list) {
-        fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => c.decodeAudioData(b)).then((d) => gen === made && (buf[n] = d)).catch(() => {});
+        fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => c.decodeAudioData(b)).then((d) => gen === made && stash(n, d)).catch(() => {});
       }
     }
     weather = makeWeatherLoops();
@@ -175,16 +214,19 @@ try {
 // one of the named sound's variants; vol 0..1, rate around 1, both jittered
 export function play(name, vol = 0.6, rate = 1, delay = 0) {
   if (!ac || muted) return;
-  const list = FILES[name];
-  const b = list && buf[list[Math.floor(Math.random() * list.length)]];
+  const list = FILES[name], n = list && list[Math.floor(Math.random() * list.length)], b = n && buf[n];
   if (!b) return;
   try {
-    const s = ac.createBufferSource(), g = ac.createGain();
+    const s = ac.createBufferSource(), g = ac.createGain(), m = meta[n] || { lead: 0 };
     s.buffer = b;
-    s.playbackRate.value = rate * (0.92 + Math.random() * 0.16);
-    g.gain.value = vol * (0.85 + Math.random() * 0.3);
+    const r = (s.playbackRate.value = rate * (0.92 + Math.random() * 0.16)), v = vol * (0.85 + Math.random() * 0.3) * evenOut(name, n);
+    // (from where its sound starts, evened out to its variants, and faded over its last 12 ms: see meta)
+    const t = ac.currentTime + delay, end = t + (b.duration - m.lead) / r;
+    g.gain.setValueAtTime(v, t);
+    g.gain.setValueAtTime(v, Math.max(t, end - 0.012));
+    g.gain.linearRampToValueAtTime(0, end);
     s.connect(g).connect(out);
-    s.start(ac.currentTime + delay);
+    s.start(t, m.lead);
   } catch {}
 }
 
@@ -367,21 +409,23 @@ export function splash(vol = 0.3, delay = 0) {
 }
 
 // a stage of a trade's work: each sounds like what it does
+// (the trades evened out, measured: QA's sound runs 2026-11-14 had the fire's stones 7-9 dB over the game's median moment
+// and the water 5 dB under it, lost under the music; now each build sits within a few dB of the others)
 export function build(kind) {
   if (kind === 'fire') {
-    play('stone', 0.45);
-    play('stone', 0.35, 1, 0.14);
+    play('stone', 0.28);
+    play('stone', 0.22, 1, 0.14);
   } else if (kind === 'tent') {
     play('thud', 0.4);
     play('thud', 0.35, 1, 0.2);
     play('cloth', 0.3, 1, 0.4);
   } else if (kind === 'bench') {
-    play('tap', 0.3);
-    play('tap', 0.3, 1, 0.15);
-    play('plank', 0.35, 1, 0.34);
+    play('tap', 0.25);
+    play('tap', 0.25, 1, 0.15);
+    play('plank', 0.29, 1, 0.34);
   } else if (kind === 'water') {
-    splash(0.28);
-    play('drop', 0.25, 1.2, 0.05);
+    splash(0.55);
+    play('drop', 0.5, 1.2, 0.05);
   } else if (kind === 'chest') {
     play('coins', 0.35);
     play('book', 0.35, 1, 0.22);
@@ -401,7 +445,19 @@ export function home(n) {
 }
 
 // the game's ends and the camp's moments, in the music's key (D major)
+// a tune doesn't stack on itself or on the win's (QA's sound role 2026-11-14, SOUND-4: two crews done by one move played
+// "done" twice 67 ms apart, over the win tune): a 'done' waits out another 'done' (1 s) and the win (2.5 s). Timed on the
+// audio clock (on the game's where there is none yet, a silent test tab say, so the log still says what was skipped: false)
+const lastTune = {};
+let tuneCtx = null;
 export function jingle(kind, delay = 0) {
+  if (tuneCtx !== ac) {
+    tuneCtx = ac;
+    for (const k of Object.keys(lastTune)) delete lastTune[k];
+  }
+  const at = (ac ? ac.currentTime : clock()) + delay;
+  if (kind === 'done' && (at - (lastTune.done ?? -99) < 1 || at - (lastTune.win ?? -99) < 2.5)) return false;
+  lastTune[kind] = at;
   if (!ac || muted || !sting) return;
   try {
     const t = ac.currentTime + 0.03 + delay;
@@ -461,7 +517,7 @@ export async function borrow(ctx, files = true) {
   music = files ? makeTrack(ctx, mg, TRACK) : makeMusic(ctx, mg);
   sting = makeMusic(ctx, mg, STING);
   if (files) {
-    await Promise.all(Object.values(FILES).flat().map((n) => fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b)).then((d) => (buf[n] = d)).catch(() => {})));
+    await Promise.all(Object.values(FILES).flat().map((n) => fetch(file(n)).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b)).then((d) => stash(n, d)).catch(() => {})));
     await music.ready;
   }
   return {
@@ -479,4 +535,41 @@ export function star(k) {
     sting.phrase([[74, 78, 81][k] || 86], ac.currentTime + 0.02, 0, 0.55);
     play('glass', 0.16, 1.3 + k * 0.15);
   } catch {}
+}
+
+// ?soundlog (QA's sound role, 2026-11-14; an agent can't hear, so it reads what the game asked for): every sound call, with
+// the game's clock (main.js logClock), into window.SOUNDLOG: { t, ms (the page's clock), name, args, depth (0: the game's own call; 1+: a part of
+// a sound made of others, a build's plays say), muted, music }. It logs in ?playtest too, where nothing is heard, and
+// whether or not the sound would be (muted); tools/check-sound.js reads it, and renders it offline to measure the mix
+let clock = () => 0, depth = 0;
+export const logClock = (fn) => (clock = fn);
+if (/[?&]soundlog\b/.test(location.search)) {
+  const log = (window.SOUNDLOG = []);
+  const wrap = (name, fn) => (...args) => {
+    const e = { t: +clock().toFixed(3), ms: Math.round(performance.now()), name, args, depth, muted, music: !musicOff };
+    log.push(e);
+    depth++;
+    try {
+      const r = fn(...args);
+      if (r === false) e.skipped = true;   // (asked for, and rightly not played: a tune on another, jingle)
+      return r;
+    } finally {
+      depth--;
+    }
+  };
+  // (the module's own calls go through these too: build's plays are logged as its parts)
+  wake = wrap('wake', wake);
+  setSound = wrap('setSound', setSound);
+  setMusic = wrap('setMusic', setMusic);
+  play = wrap('play', play);
+  chime = wrap('chime', chime);
+  cellTick = wrap('cellTick', cellTick);
+  whoosh = wrap('whoosh', whoosh);
+  splash = wrap('splash', splash);
+  build = wrap('build', build);
+  home = wrap('home', home);
+  jingle = wrap('jingle', jingle);
+  owl = wrap('owl', owl);
+  gateShut = wrap('gateShut', gateShut);
+  star = wrap('star', star);
 }

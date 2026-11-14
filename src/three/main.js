@@ -18,8 +18,8 @@ import { makeWorld, plantForest, natureMaterial, LOW } from './world.js';
 import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, wallModel, SUPPLY, GROUND } from './board.js';
 import { makeParticles, dustPuff, unpackBurst } from './fx.js';
 import { makeCamp, campKeepOut, campDepth } from './camp.js';
-import { drawTrail, drawShop, icon, COIN } from './trail.js';
-import { ITEMS, item, SHOP_MODELS, winCoins, loadWallet, nextItem } from './shop.js';
+import { drawTrail, drawShop, drawFeature, icon, COIN } from './trail.js';
+import { item, SHOP_MODELS, winCoins, loadWallet, nextItem, forSale, campLook, LINES, PETS } from './shop.js';
 import { makeWeather, KINDS } from './weather.js';
 import * as sfx from './sound.js';
 import { makeEmber, makeBubble } from './ember.js';
@@ -66,7 +66,13 @@ try {
 // once (the stars won on each level, the furthest level reached, the level cards seen)
 try {
   if (!q.has('proto') && store.getItem('bd3.v') !== '2') {
-    const was = JSON.parse(store.getItem('bd3.stars') || '{}') || {}, moved = {};
+    // (stars that won't parse count as none: the parse used to throw before bd3.v was written, so the move ran again on the
+    // next load, onto a save made after the warm-up: QA 2026-11-14, ROBUST-1)
+    let was = {};
+    try {
+      was = JSON.parse(store.getItem('bd3.stars') || '{}') || {};
+    } catch {}
+    const moved = {};
     for (const [k, n] of Object.entries(was)) moved[Number(k) + 1] = n;
     if (store.getItem('bd3.stars') != null) store.setItem('bd3.stars', JSON.stringify(moved));
     if (store.getItem('bd3.reached') != null) store.setItem('bd3.reached', String((Number(store.getItem('bd3.reached')) || 0) + 1));
@@ -93,6 +99,8 @@ for (const [k, n] of Object.entries(best)) if (n > 0) reached = Math.max(reached
 const starTotal = () => (q.has('stars') ? Number(q.get('stars')) || 0 : Object.values(best).reduce((s, n) => s + n, 0));
 // the camp shop's wallet (shop.js, 2026-11-14): coins, and what the camp has (it used to be what the stars' total earned)
 const wallet = loadWallet(store, q, starTotal());
+// how far the levels have got, 1-based (the shop's dearer tiers open as they go on: shop.js open)
+const reachedLevel = () => Math.max(reached, levelIndex) + 1;
 // what the last win earned (the win card shows it): stars more than the level's best, the coins it paid; the total the HUD
 // shows, which counts the new stars in as they fly to it; fresh: a thing just bought (the camera goes to it, spotlight)
 let fresh = [], gained = 0, paid = 0, shownTotal = starTotal();
@@ -150,6 +158,7 @@ async function loadModels() {
 }
 
 let campPortrait = false, L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
+sfx.logClock(() => t);   // (?soundlog: the sounds logged on the game's clock, sound.js)
 // a win that earned the camp something new: the camera has been to it (spotlight), and where it is (null: on the board)
 let spotlit = false, spotAt = null, unlockUntil = 0;
 // the warm-up's first win flows on into level 2: no camera to the lanterns, the card's one button fills and goes on by itself
@@ -194,7 +203,7 @@ function story(k) {
     prior[c] = total[c];
     if (!colors.includes(c)) colors.push(c);
   }
-  return q.has('proto') ? null : { colors, prior, total, size: SIZE, count, extras: wallet.owned.slice() };
+  return q.has('proto') ? null : { colors, prior, total, size: SIZE, count, look: campLook(wallet) };
 }
 
 function cellCenter(i, x, y) {
@@ -213,6 +222,7 @@ function load() {
   // each level has its own weather (Oleg, 2026-10-24); the pill still changes it while playing, ?weather= for tests
   if (weather) weather.set(q.get('weather') || L.weather || 'breeze');
   board = buildBoard(scene, models, L, { gates: q.get('gates') });
+  if (!q.has('proto')) board.setTier(wallet.tier('board'));
   spots = board.spots;
   const [vw, vh] = viewSize();
   campPortrait = vh > vw;
@@ -227,7 +237,8 @@ function load() {
   flow = false;
   flowAt = introAt = 0;
   cardBack = false;
-  $('cardWait').hidden = $('introWait').hidden = true;
+  waitLink($('cardWait'), false);
+  waitLink($('introWait'), false);
   blinkI = -1;
   const heavy = L.blocks.map((b, i) => (b.axis ? i : -1)).filter((i) => i >= 0);
   wayQueue = heavy.length && !waysShown.has(levelIndex) && !film && !cover ? { list: heavy, at: null } : null;
@@ -1541,7 +1552,13 @@ function land(c, speed) {
   const k = Math.min(speed / 4, 1);
   c.squashV -= 2 + speed * 1.4;
   dustPuff(fx.dust, c.cur.x, c.cur.z, c.b.w - 0.1, c.b.h - 0.1, 0.3 + k * 0.6);
-  sfx.play(speed > 3.2 ? 'heavy' : 'drop', 0.3 + k * 0.45, 1.05 - k * 0.15);
+  // (one landing sound per landing, and a fast one no louder than the moments round it: an undo's crate flew home fast and
+  // landed with the heavy thud at 0.75, then again with a drop, the loudest sound in the game: QA's sound role 2026-11-14,
+  // SOUND-5. The heavy file is the loudest of the crate sounds: it gets less)
+  if (t - (c.landAt ?? -9) < 0.3) return;
+  c.landAt = t;
+  if (speed > 3.2) sfx.play('heavy', 0.25 + k * 0.2, 1.05 - k * 0.15);
+  else sfx.play('drop', 0.3 + k * 0.45, 1.05 - k * 0.15);
 }
 
 // out of the gate in an arc onto the gate's mat, where it waits, packed, for the worker to carry it off to the camp
@@ -1710,7 +1727,7 @@ function frameFor(w, h, kind) {
   // a newly earned extra: closer in on its place, with a little of the camp round it (on the board: the whole camp)
   if (kind === 'extra') {
     if (!spotAt) return { ...whole, dir };
-    const s = spotAt, m = s.pet ? 1.7 : 3.2;   // (a pet is small: closer in)
+    const s = spotAt, m = s.pet ? 1.7 : s.near ? 2.1 : 3.2;   // (a pet is small: closer in; a part's upgrade: close, a little of the camp round it)
     return { ...fit([new THREE.Vector3(s.x - s.w / 2 - m, 0, s.z - s.d / 2 - m), new THREE.Vector3(s.x + s.w / 2 + m, 0, s.z + s.d / 2 + m)], 1.2), dir };
   }
   if (kind !== 'play') return { ...whole, dir };
@@ -1765,7 +1782,15 @@ function resize() {
   if (!L) return;
   const [w, h] = viewSize();
   // turned before the first move: the camp laid out again for the new shape (its places differ upright and on its side)
-  if (h > w !== campPortrait && moves === 0 && state === 'play' && !drag && !watching() && !film && !cover) return busy(load);
+  // (a level card still counting down starts its count again, Wait and all: load() stopped it and left the card up with a
+  // full button that never went, QA 2026-11-14, UI-3; one the player held stays held)
+  if (h > w !== campPortrait && moves === 0 && state === 'play' && !drag && !watching() && !film && !cover) {
+    const recount = $('intro').classList.contains('on') && introAt > 0;
+    return busy(() => {
+      load();
+      if (recount) intro();
+    });
+  }
   if (film || cover) renderer.setPixelRatio(1);
   renderer.setSize(w, h, false);
   fitCamera(w, h);
@@ -1908,15 +1933,27 @@ function intro() {
     go.style.setProperty('--fill', `${INTRO_SECS}s`);
     introAt = t + INTRO_SECS;
   }
-  $('introWait').hidden = !counting;
+  waitLink($('introWait'), counting);
   ui();   // (no lesson tip under the card)
 }
-// stops the level card's countdown, and a won card's (its "Next level" no longer fills; "Wait" goes)
+// a card's "Wait" link: shown while its countdown runs, back to "Wait"
+function waitLink(el, on) {
+  el.hidden = !on;
+  el.textContent = 'Wait';
+  el.classList.remove('held');
+}
+// stops the level card's countdown, and a won card's (its "Next level" no longer fills). "Wait" stays where it is, as "Take
+// your time": it went, the card shrank and a phone's tap landed on the button that slid under the finger, so Wait closed the
+// card it was to keep open (iPhone test 2026-11-14, Oleg: "wait button closes the popups instead of staying")
 function stopAuto() {
   introAt = flowAt = 0;
   $('introGo').classList.remove('auto');
   $('cardBtns').querySelector('.auto')?.classList.remove('auto');
-  $('introWait').hidden = $('cardWait').hidden = true;
+  for (const w of [$('introWait'), $('cardWait')]) {
+    if (w.hidden) continue;
+    w.textContent = 'Take your time';
+    w.classList.add('held');
+  }
 }
 $('introWait').onclick = stopAuto;
 $('intro').addEventListener('pointerdown', (e) => introAt && !e.target.closest('#introGo') && stopAuto());
@@ -1925,7 +1962,7 @@ $('introGo').onclick = () => {
   sfx.wake();
   introAt = 0;
   $('introGo').classList.remove('auto');
-  $('introWait').hidden = true;
+  waitLink($('introWait'), false);
   $('intro').classList.remove('on');
   try {
     store.setItem(`bd3.card${levelIndex}`, '1');
@@ -1999,7 +2036,7 @@ function showCard() {
           flowAt = t + AUTO_SECS;
         }
       }
-      $('cardWait').hidden = !flowAt;
+      waitLink($('cardWait'), !!flowAt);
       if (!flow) {
         button('Play again', () => busy(load), !last);
         if (stars < 3) button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
@@ -2027,10 +2064,10 @@ function showCard() {
     celebrate = 3.2;
     // the camp's new extra pops up as the stars land; the card names it, or says what the next one needs
     // the coins the win paid, and the shop as a strip of its own (Oleg, 2026-11-14: the line "looks like a tooltip"): the
-    // best thing the coins buy now, its picture, price and a Buy that buys it from here; else the cheapest one still to buy
-    // with how far off it is, and the shop
+    // best thing the coins buy now, its picture and price; else the cheapest one still to buy with how far off it is. Its
+    // button opens the shop on that thing (iPhone test 2026-11-14: a Buy here was over too fast to feel like buying)
     if (!q.has('proto')) shopStrip();
-    flyStars(stars - gained, stars);    flyStars(stars - gained, stars);
+    flyStars(stars - gained, stars);
   }
   $('card').classList.add('on');
   ui();
@@ -2050,46 +2087,101 @@ $('card').addEventListener('pointerdown', (e) => {
 });
 $('cardWait').onclick = stopAuto;
 
-// the camera to the camp's newly earned extra (the last, if two came at once), which pops up as it gets there
-function spotlight() {
+// the camera to a thing just bought (the shop's upgrade on its part of the camp, the pet where it is, the whole camp for the
+// board), a note naming it; then back to the view there was. The camera takes about 1.5 s to get there, then the new look
+// has its moment (a pet dances hello)
+function spotlight(it) {
   spotlit = true;
-  const extra = item(fresh[fresh.length - 1]);
-  for (const id of fresh) camp.extras.reveal(id, 0.7);   // (built first: a pet's place is wherever it was put)
-  spotAt = camp.extras.where(extra.id);
+  spotAt = camp.spotOf(it.line, it.id);
   setView('extra');
-  $('unlockNote').innerHTML = `${icon(extra.id, 30)}<span>New for the camp: <b>${extra.name}</b>!</span>`;
+  $('unlockNote').innerHTML = `${icon(it.id, 30)}<span>New for the camp: <b>${it.name}</b>!</span>`;
   $('unlockNote').classList.add('on');
-  unlockUntil = t + 2.7;
+  unlockUntil = t + 4.5;
+  if (it.line === 'pet') camp.extras.hello?.(it.id, 4.5);
   setTimeout(() => sfx.chime([659, 880, 1175], 0.06, 0.9), playtest ? 0 : 700);
 }
 
-// the shop (camp trail): bought, the trail closes and the camera goes to the new thing as it pops up; then back to the view
-// there was (the level, or the won level's card)
-let backView = null;
+// the shop: bought, the coins fly into the thing's picture and it pops; then the shop closes, the camp takes its new look at
+// once (camp.setLook, board.setTier: the new pieces pop up) and the camera goes to it; then back to the view there was (the
+// level, or the won level's card)
+let backView = null, buying = false;
 async function buy(id) {
-  const it = item(id);
-  if (!it || wallet.has(id) || wallet.coins < it.price) return;
+  const it = item(id), sale = forSale(wallet, reachedLevel()).find((x) => x.id === id);
+  if (!it || buying || !sale || !sale.open || wallet.coins < it.price) return;
+  buying = true;
+  const was = wallet.coins;
   wallet.coins -= it.price;
   wallet.owned.push(id);
+  if (it.line === 'pet') wallet.pet = id;
   wallet.save();
+  const ready = ensureShop(id);   // (a pet's model loads while the coins fly)
   sfx.play('coins', 0.5);
+  await payCoins(was, wallet.coins);
   coinBump();
-  $('map').classList.remove('on');
+  await ready;
+  showOff(it);
+  buying = false;
+}
+// a pet bought before brought out instead of the one out now
+async function bringOut(id) {
+  if (buying || !wallet.has(id) || wallet.pet === id) return;
+  wallet.pet = id;
+  wallet.save();
   await ensureShop(id);
+  showOff(item(id));
+}
+function showOff(it) {
+  $('map').classList.remove('on');
   backView = view === 'extra' ? backView : view;
-  // bought from the won card: the card steps aside while the camera shows the new thing (it would cover it), then comes back
+  // the won card steps aside while the camera shows the new thing (it would cover it), then comes back
   if ($('card').classList.contains('on')) {
     $('card').classList.remove('on');
     cardBack = true;
   }
-  fresh = [id];
-  spotlight();
+  if (state === 'won' && !showing && !q.has('proto')) shopStrip();
+  camp.setLook(campLook(wallet));
+  board.setTier(wallet.tier('board'));
+  spotlight(it);
+}
+// the coins fly from the shop's coin count into the bought thing's picture, the count going down as they leave; then the
+// picture pops with a gold ring and its name says it is yours
+function payCoins(from, to) {
+  const box = $('shopFeature'), pic = box.querySelector('.pic'), purse = $('mapCoins'), btn = box.querySelector('.buyBtn');
+  if (btn) btn.disabled = true;
+  if (playtest || !pic) return Promise.resolve((purse.textContent = to));
+  $('map').querySelector('.sheet').scrollTop = 0;   // (the coins and the picture both in sight)
+  const n = 7, a = purse.getBoundingClientRect(), b = pic.getBoundingClientRect();
+  return new Promise((done) => {
+    for (let k = 0; k < n; k++) {
+      setTimeout(() => {
+        purse.textContent = Math.round(from - ((from - to) * (k + 1)) / n);
+        const f = document.createElement('div');
+        f.className = 'flyer coin';
+        f.innerHTML = COIN(22);
+        Object.assign(f.style, { left: `${a.left + a.width / 2}px`, top: `${a.top + a.height / 2}px` });
+        document.body.append(f);
+        const dx = b.left + b.width / 2 - a.left - a.width / 2 + (k - 3) * 6, dy = b.top + b.height / 2 - a.top - a.height / 2;
+        requestAnimationFrame(() => requestAnimationFrame(() => (f.style.transform = `translate(${dx}px, ${dy}px) scale(1.3)`)));
+        setTimeout(() => {
+          f.remove();
+          sfx.play('pick', 0.22, 1.6 + k * 0.08);
+        }, 520);
+      }, k * 85);
+    }
+    setTimeout(() => {
+      box.classList.add('got');
+      sfx.chime([523, 659, 784, 1047], 0.05, 0.7);
+    }, n * 85 + 480);
+    setTimeout(done, n * 85 + 1500);
+  });
 }
 let cardBack = false;
-// the thing to offer: the dearest pet the coins buy, else the dearest thing they buy, else the cheapest still to buy
+// the thing to offer: of what is open (shop.js forSale: each line's next tier, the pets not bought), the dearest pet the coins
+// buy, else the dearest thing they buy, else the cheapest still to buy
 function offer() {
-  const can = ITEMS.filter((it) => !wallet.has(it.id) && it.price <= wallet.coins), pets = can.filter((it) => it.kind === 'pet');
-  return can.length ? { it: (pets.length ? pets : can).at(-1), can: true } : { it: nextItem(wallet.owned), can: false };
+  const sale = forSale(wallet, reachedLevel()).filter((it) => it.open).sort((x, y) => x.price - y.price);
+  const can = sale.filter((it) => it.price <= wallet.coins), pets = can.filter((it) => it.line === 'pet');
+  return can.length ? { it: (pets.length ? pets : can).at(-1), can: true } : { it: sale[0] || null, can: false };
 }
 function shopStrip() {
   const o = offer(), box = $('cardExtra');
@@ -2099,17 +2191,15 @@ function shopStrip() {
   }
   const { it, can } = o;
   box.innerHTML = `<div class="shopStrip${can ? ' can' : ''}"><div class="pic">${icon(it.id, 48)}</div><div class="txt"><div class="earn">${COIN(20)}<b>+${paid}</b> coins</div>`
-    + (can ? `<div class="what"><b>${it.name}</b> for the camp · ${COIN(14)}${it.price}</div>`
-      : `<div class="what">${it.price - wallet.coins} more for the <b>${it.name.toLowerCase()}</b></div><div class="bar"><i style="width:${Math.round((100 * wallet.coins) / it.price)}%"></i></div>`)
-    + `</div><button class="${can ? 'buy' : 'shop'}">${can ? 'Buy' : 'Shop'}</button></div>`;
-  const b = box.querySelector('button');
-  b.onclick = (e) => {
+    + (can ? `<div class="what"><b>${it.name}</b> for ${COIN(14)}${it.price}</div>`
+      : `<div class="what">${it.price - wallet.coins} more for <b>${it.name}</b></div><div class="bar"><i style="width:${Math.round((100 * wallet.coins) / it.price)}%"></i></div>`)
+    + `</div><button class="${can ? 'buy' : 'shop'}">Shop</button></div>`;
+  const go = (e) => {
     e.stopPropagation();
-    sfx.wake();
-    if (can) buy(it.id).then(() => shopStrip());
-    else openTrail();
+    openShop(tileKey(it));
   };
-  box.querySelector('.pic').onclick = () => openTrail();
+  box.querySelector('button').onclick = go;
+  box.querySelector('.pic').onclick = go;
 }
 function coinBump() {
   const pill = $('coins');
@@ -2121,7 +2211,7 @@ function coinBump() {
 }
 // the coin pill glows while the coins buy something (Oleg, 2026-11-14: "can visually attract when you have money to buy")
 function coinGlow() {
-  const n = nextItem(wallet.owned);
+  const n = nextItem(wallet, reachedLevel());
   $('coins').classList.toggle('can', !!n && wallet.coins >= n.price && !q.has('proto'));
 }
 
@@ -2157,32 +2247,96 @@ function flyStars(from, to) {
   }
 }
 
-// ---- the camp trail (the level map): each level's stars, the total, the camp's extras; a level to play ----
-function openTrail() {
+// ---- the camp trail (the level map) and the camp shop: two tabs of one panel. The trail: each level's stars, the total, a
+// level to play. The shop: the thing shown big with its Buy, and a tile for each thing ----
+let shopSel = null;
+function openMap(tab, sel) {
   sfx.wake();
   // a won level's "Next level" stops counting down (the shop is a reason to stay, 2026-11-14)
   if (flowAt || introAt) stopAuto();
-  const total = starTotal(), open = Math.max(reached, levelIndex);
-  $('mapTotal').textContent = total;
-  $('mapMax').textContent = LIST.length * 3;
   $('settings').classList.remove('on');
+  $('mapTotal').textContent = starTotal();
+  $('mapMax').textContent = LIST.length * 3;
   $('map').classList.add('on');   // first, so the trail can measure its width
+  if (tab === 'shop') shopSel = sel || (offer().it ? tileKey(offer().it) : 'tent');
+  showTab(tab);
+  const sheet = $('map').querySelector('.sheet');
+  sheet.scrollTop = 0;   // (the shop: the coins and the picture both in sight)
+  // the trail opens at the player's place: the level in play (else the furthest open one) in the middle of the sheet (QA
+  // 2026-11-14, PROGRESS-1: on levels 26-31 it opened at the top, the player's level and its button out of sight)
+  if (tab !== 'shop') {
+    const node = $('mapTrail').querySelector('.node.now') || [...$('mapTrail').querySelectorAll('.node:not(.locked)')].pop();
+    if (node) sheet.scrollTop = Math.max(0, node.getBoundingClientRect().top - sheet.getBoundingClientRect().top - sheet.clientHeight * 0.45);
+  }
+}
+function showTab(tab) {
+  const shop = tab === 'shop';
+  $('map').classList.toggle('shop', shop);
+  $('tabTrail').classList.toggle('on', !shop);
+  $('tabShop').classList.toggle('on', shop);
+  $('mapTitle').textContent = shop ? 'Camp shop' : 'Camp trail';
+  $('mapCoins').textContent = wallet.coins;
+  $('tabShop').classList.toggle('can', forSale(wallet, reachedLevel()).some((it) => it.open && it.price <= wallet.coins));
+  if (shop) drawShopTab();
+  else drawTrailTab();
+}
+function drawTrailTab() {
+  const open = Math.max(reached, levelIndex);
   const pick = (k) => {
     $('map').classList.remove('on');
     if (k !== levelIndex || state !== 'play') busy(() => goTo(k));
   };
   drawTrail($('mapTrail'), { count: LIST.length, best, open, current: levelIndex, pick });
-  drawShop($('mapExtras'), $('mapNext'), { owned: wallet.owned, coins: wallet.coins, buy });
-  $('mapCoins').textContent = wallet.coins;
   // the button: the first open level without stars, else the one in play
   const first = LIST.findIndex((_, k) => k <= open && !best[k]), play = first >= 0 ? first : levelIndex;
   $('mapPlay').textContent = play === levelIndex && state === 'play' ? `Back to level ${play + 1}` : `Play level ${play + 1}`;
   $('mapPlay').onclick = () => pick(play);
 }
+// the shop's tiles: a line each (its next tier, or its last when all are bought; the tiers bought; whether the levels have got
+// to the next), a tile each for the pets (bought, and which is out)
+const tileKey = (it) => (it.line === 'pet' ? it.id : it.line);
+function shopTiles() {
+  const lvl = reachedLevel(), out = [];
+  for (const l of LINES) {
+    const have = wallet.tier(l.line), of = l.tiers.length, it = item(`${l.line}${Math.min(have + 1, of)}`);
+    out.push({ key: l.line, it, title: l.name, have, of, done: have >= of, open: have >= of || it.open <= lvl });
+  }
+  for (const p of PETS) {
+    const it = item(p.id), have = wallet.has(p.id) ? 1 : 0;
+    out.push({ key: p.id, it, title: p.name, have, of: 1, done: !!have, open: !!have || it.open <= lvl, out: wallet.pet === p.id });
+  }
+  return out;
+}
+function drawShopTab() {
+  const tiles = shopTiles(), tile = tiles.find((x) => x.key === shopSel) || tiles[0];
+  shopSel = tile.key;
+  drawFeature($('shopFeature'), tile, { coins: wallet.coins, buy, bringOut });
+  drawShop($('mapExtras'), { tiles, coins: wallet.coins, sel: shopSel, pick: (key) => {
+    if (buying) return;
+    shopSel = key;
+    drawShopTab();
+    // a phone: the shown thing is at the top of the shop, maybe scrolled out of sight above the tiles: back up to it and the
+    // coins (they fly from there when it is bought)
+    const sheet = $('map').querySelector('.sheet');
+    if ($('shopFeature').getBoundingClientRect().top < sheet.getBoundingClientRect().top + 8) sheet.scrollTo({ top: 0, behavior: 'smooth' });
+  } });
+}
+function openTrail() {
+  openMap('trail');
+}
+function openShop(id) {
+  openMap('shop', id);
+}
 $('trail').onclick = openTrail;
-$('coins').onclick = openTrail;
+$('coins').onclick = () => openShop();
 $('setTrail').onclick = openTrail;
-$('mapClose').onclick = () => $('map').classList.remove('on');
+$('tabTrail').onclick = () => !buying && showTab('trail');
+$('tabShop').onclick = () => {
+  if (buying) return;
+  shopSel ??= offer().it?.id || null;
+  showTab('shop');
+};
+$('mapClose').onclick = $('shopDone').onclick = () => !buying && $('map').classList.remove('on');
 
 // to another level: a new day; the camp keeps what it has (camp.js builds it from the levels before)
 function goTo(k) {
@@ -2207,7 +2361,7 @@ function step(dt) {
   if (note && t >= note.until) say('', 0);
   sfx.setEvening(duskShown, camp.fireSize());
   sfx.tick();
-  camp.update(dt, t, duskShown, state, moves, new Set(L.blocks.filter((b, k) => pos[k]).map((b) => b.color)));
+  camp.update(dt, t, duskShown, state, moves, new Set(L.blocks.filter((b, k) => pos[k]).map((b) => b.color)), view === 'extra');
   fireflies(dt);
   waveFlags(board.flags, t);
   if (thinking) emberThink(dt);
@@ -2266,10 +2420,7 @@ function step(dt) {
     flowAt = 0;
     busy(() => goTo(levelIndex + 1));
   }
-  if (endAt && t >= endAt && state === 'won' && !showing && !watchUrl && fresh.length && !spotlit && !flow) {
-    spotlight();
-    endAt = t + 2.8;
-  } else if (endAt && t >= endAt) {
+  if (endAt && t >= endAt) {
     endAt = Infinity;
     showCard();
     if (watchUrl && !film && !q.has('stay')) {
@@ -2423,6 +2574,42 @@ if (playtest) {
       for (let k = 0; k < 20; k++) tick();
       renderer.render(scene, camera);
       return `dragged; played ${(played / 1000).toFixed(1)} s`;
+    },
+    // ?audible (QA's live sound tap, 2026-11-14): the game played at its real pace for ms (at most 30 s), so its sounds come
+    // out as a player hears them (run() plays seconds in a moment and would pile them up); a tab that plays sound keeps its
+    // timers on time in the background, which steps shows (about 60 a second, or the tab is held back)
+    async live(ms) {
+      const end = performance.now() + Math.min(ms, 30000);
+      let last = performance.now(), n = 0;
+      while (performance.now() < end) {
+        await new Promise((r) => setTimeout(r, 16));
+        const now = performance.now();
+        step(Math.min((now - last) / 1000, 0.05));
+        played += now - last;
+        last = now;
+        n++;
+      }
+      renderer.render(scene, camera);
+      return `live ${(ms / 1000).toFixed(1)} s: ${n} steps; played ${(played / 1000).toFixed(1)} s`;
+    },
+    // a drag at a hand's real pace (see live): press at the first point (a crate's middle), move through the rest over ms,
+    // let go, and the game plays on for after ms
+    async liveDrag(pts, ms = 800, kind = 'mouse', after = 600) {
+      const el = at(...pts[0]), t0 = performance.now(), segs = pts.length - 1;
+      fire(el, 'pointerdown', ...pts[0], kind);
+      let last = t0;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 16));
+        const now = performance.now(), f = Math.min(1, (now - t0) / ms), k = Math.min(segs - 1, Math.floor(f * segs)), u = f * segs - k;
+        const [ax, ay] = pts[k], [bx, by] = pts[k + 1];
+        fire(el, 'pointermove', ax + (bx - ax) * u, ay + (by - ay) * u, kind);
+        step(Math.min((now - last) / 1000, 0.05));
+        played += now - last;
+        last = now;
+        if (f >= 1) break;
+      }
+      fire(el, 'pointerup', ...pts[pts.length - 1], kind);
+      return this.live(after);
     },
     tap(x, y, kind = 'mouse') {
       const el = at(x, y);
@@ -2610,6 +2797,10 @@ async function coverShot() {
 window.BD3 = {
   // the models, and loading one more (tools/shop-icons.js); the camera's view and the place it looks at for a new thing
   models, loadModel, view: () => ({ view, spotAt, backView }),
+  // the shop's wallet and the camp's look (checks, pictures); buy and bring out a pet as the shop does
+  wallet: () => wallet, look: () => campLook(wallet), buy: (id) => buy(id), bringOut: (id) => bringOut(id),
+  boardTier: (t) => board.setTier(t),
+  showCrates: (on) => crates.forEach((c) => (c.group.visible = on)),
   state: () => ({ level: levelIndex + 1, moves, left: left(pos), state, lostTo, bedtime: nextBedtime(L, moves), dusk: duskShown, budget: L.budget, par: L.par, pos: pos.map((p) => p && p.slice()), weather: weather.kind() }),
   goTo: (k) => goTo(k - 1),
   // a won level stays put instead of going on by itself (checks that let it settle): AUTO_SECS
@@ -2633,6 +2824,9 @@ window.BD3 = {
   keepOut: () => campKeepOut(SIZE),
   board: () => ({ ox: board.ox, oz: board.oz, w: L.w, h: L.h, gates: L.gates }),
   campBoxes: () => camp.boxes(),
+  // the camp itself (its sites: pos, f, r, prebuilt and built pieces), for picture tools (tier mock-ups, 2026-11-14)
+  camp: () => camp,
+  boardGroup: () => board.group,
   campLoop: () => camp.loop(),
   doors: () => Object.entries(board.doors || {}).map(([color, d]) => {
     const tip = (a) => [d.hinge.x + Math.cos(a) * d.len, d.hinge.z - Math.sin(a) * d.len];

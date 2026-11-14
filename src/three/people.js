@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { dress } from './trades.js';
+import { makeTool } from './tiers.js';
 
 export const HEIGHT = 0.95;
 
@@ -264,18 +265,63 @@ function kenneyCamper(c, color, models, who) {
   }
   // dressed for their trade (trades.js); the load on the back comes off in bed
   const pack = dress(model, who);
+  // the tool of their trade from the shop (shop.js tools, tiers.js makeTool; Oleg 2026-11-14): in the right hand, twice the
+  // size of a belt tool so it reads from the game camera, spun half a turn on its handle; at their work they swing it with
+  // that arm alone (the rest of them idle; the whole-body swing twisted them and pointed the tool backwards), at half the
+  // clip's pace. While the hands carry a crate it rides on the back. The arm's mesh runs along its bone's -x (the hand at
+  // -0.25..-0.28), so the grip is there
+  const arm = model.getObjectByName('arm-right');
+  const only = (c, keep) => c && new THREE.AnimationClip(`${c.name}-${keep ? 'arm' : 'rest'}`, c.duration, c.tracks.filter((tr) => /arm-right/.test(tr.name) === keep));
+  const restIdle = only(clips.idle, false), swingArm = only(clips['attack-melee-right'], true);
+  const TOOL_MAP = { work: [restIdle, swingArm], tinker: [restIdle, swingArm] }, TOOL_PACE = { work: 0.9, tinker: 0.55 };
+  let tool = null, toolBack = null, lyingNow = false;
+  const belt = torso ? torso.children.filter((g) => g.isGroup && Math.abs(Math.abs(g.position.x) - 0.142) < 0.01 && Math.abs(g.position.z - 0.06) < 0.02) : [];
+  const showTool = () => {
+    if (!tool) return;
+    const back = now === 'carry' || now === 'pickup';
+    tool.visible = !back && !lyingNow;
+    toolBack.visible = back && !lyingNow;
+  };
   return {
     root,
     lying(on) {
       if (pack) pack.visible = !on;
+      lyingNow = on;
+      showTool();
+    },
+    // tier 0: none (the belt tool as dressed); 1 iron, 2 steel, 3 gold
+    tool(tier) {
+      for (const o of [tool, toolBack]) o?.parent?.remove(o);
+      tool = toolBack = null;
+      for (const g of belt) g.visible = !tier;
+      if (tier && arm && torso) {
+        const hand = makeTool(who, tier);
+        hand.rotation.set(Math.PI / 2 + 0.25, Math.PI, 0);
+        hand.scale.setScalar(2);
+        tool = new THREE.Group();
+        tool.position.set(-0.25, 0, 0.03);
+        tool.add(hand);
+        arm.add(tool);
+        toolBack = makeTool(who, tier);
+        toolBack.scale.setScalar(1.6);
+        toolBack.position.set(0.05, -0.02, -0.17);
+        toolBack.rotation.set(0, 0, 0.6);
+        torso.add(toolBack);
+      }
+      const was = now;
+      now = '';
+      if (was) this.play(was);
+      showTool();
     },
     play(s) {
-      const next = (MAP[s] || MAP.idle).map((x) => act(typeof x === 'string' ? clips[x] : x)).filter(Boolean);
+      const map = tool && TOOL_MAP[s] ? TOOL_MAP : MAP, pace = tool && TOOL_PACE[s] ? TOOL_PACE : PACE;
+      const next = (map[s] || MAP[s] || MAP.idle).map((x) => act(typeof x === 'string' ? clips[x] : x)).filter(Boolean);
       if (s === now) return;
       now = s;
-      if (next.length === playing.length && next.every((a, k) => a === playing[k])) return void next.forEach((a) => a.setEffectiveTimeScale(PACE[s] || 1));
+      showTool();
+      if (next.length === playing.length && next.every((a, k) => a === playing[k])) return void next.forEach((a) => a.setEffectiveTimeScale(pace[s] || 1));
       for (const a of playing) if (!next.includes(a)) a.fadeOut(0.2);
-      for (const a of next) a.reset().setEffectiveTimeScale(PACE[s] || 1).fadeIn(0.2).play();
+      for (const a of next) a.reset().setEffectiveTimeScale(pace[s] || 1).fadeIn(0.2).play();
       playing = next;
     },
     update: (dt) => mixer.update(dt),

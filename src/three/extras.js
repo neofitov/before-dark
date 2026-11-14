@@ -412,7 +412,7 @@ function pet(id, models, ground, seed) {
   me.root.rotation.y = R() * Math.PI * 2;
   const g = new THREE.Group();
   g.add(me.root);
-  let mode = 'idle', timer = 1 + R() * 3, to = null;
+  let mode = 'idle', timer = 1 + R() * 3, to = null, hello = 0;
   me.play('idle');
   // a free straight way to a point near by
   const clear = (x0, z0, x1, z1) => {
@@ -420,10 +420,12 @@ function pet(id, models, ground, seed) {
     for (let k = 1; k <= n; k++) if (!ground.free(x0 + ((x1 - x0) * k) / n, z0 + ((z1 - z0) * k) / n)) return false;
     return true;
   };
-  return { group: g, pet: true, root: me.root, where: () => me.root.position, update: (dt, t, dusk, state) => {
+  // hello(s): just bought, it dances for s seconds where it stands
+  return { group: g, pet: true, root: me.root, where: () => me.root.position, hello: (s) => (hello = s), update: (dt, t, dusk, state) => {
     me.mixer.update(dt);
     const p = me.root.position;
-    if (state === 'won') {
+    hello = Math.max(0, hello - dt);
+    if (state === 'won' || hello > 0) {
       if (mode !== 'dance') (mode = 'dance'), me.play('dance'), (to = null);
       return;
     }
@@ -475,9 +477,18 @@ export function makeExtras(scene, models, board, size, portrait, ids, fx, ground
   ids.forEach(build);
   return {
     has: (id) => !!built[id],
+    // one taken away (the shop's pet put back for another, 2026-11-14)
+    remove(id) {
+      const e = built[id];
+      if (!e) return;
+      scene.remove(e.group);
+      delete built[id];
+    },
     // a ground extra's place ({ x, z, w, d }), for the camera to go and look at it when it is earned; null for the ones on the
     // board (the lanterns, the bunting)
     where: (id) => spots[id] || (built[id]?.pet ? { x: built[id].where().x, z: built[id].where().z, w: 1, d: 1, pet: true } : null),
+    // a pet just bought dances hello for s seconds
+    hello: (id, s) => built[id]?.hello?.(s),
     // a newly earned one appears, after `delay` s, with a pop and a shower of sparks (the win card names it). It is built
     // at once, so the camera's end frame takes it in
     reveal(id, delay = 0) {

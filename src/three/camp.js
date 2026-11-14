@@ -12,7 +12,8 @@ import { fitted, GROUND, makeFire, flickerFire, woodMaterial, canvasTex } from '
 import { dustPuff } from './fx.js';
 import { makeCamper } from './people.js';
 import { makeWildlife } from './wildlife.js';
-import { makeExtras, extrasKeepOut, extraSpots, DECOR } from './extras.js';
+import { makeExtras, extrasKeepOut, extraSpots } from './extras.js';
+import { dressFor, givesWay, swapsFor, slotPieces, ridgeFlags } from './tiers.js';
 import * as sfx from './sound.js';
 
 const KIND = { red: 'fire', orange: 'tent', green: 'bench', blue: 'water', purple: 'chest', yellow: 'beds' };
@@ -107,11 +108,7 @@ export function campDepth(size, portrait, owned = null) {
       for (const [, z] of edge(s.pos, s.f, PLAN[k])) (z0 = Math.min(z0, z)), (z1 = Math.max(z1, z));
     }
   }
-  // (the shop's things, their row past the extras upright, once bought: the camp grows to take them in, 2026-11-14)
-  for (const [id, e] of Object.entries(extraSpots(size, portrait))) {
-    if (DECOR.includes(id) && owned && !owned.includes(id)) continue;
-    (z0 = Math.min(z0, e.z - e.d / 2)), (z1 = Math.max(z1, e.z + e.d / 2));
-  }
+  // (only the parts: the shop's upgrades stay in their ground, 2026-11-14; nothing stands in front of them any more)
   return [z0, z1];
 }
 
@@ -179,6 +176,13 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     const bed = beds[k];
     return [pop(atBed(bed, part(new RoundedBoxGeometry(0.36, 0.1, 0.2, 2, 0.04), M.pillow, 0, 0.38, -0.42), part(new RoundedBoxGeometry(0.52, 0.07, 0.3, 2, 0.03), M.blanket, 0, 0.38, 0.36)), 0.1)];
   }
+  // the pieces a tier from the shop gives way to or restyles (tiers.js), by kind and stage
+  const ROLE = { water: { 1: 'barrel', 4: 'barrel' }, chest: { 0: 'boxes', 5: 'boxes' }, fire: { 4: 'tripod' }, tent: { 3: 'canvas' }, beds: { 1: 'beddress', 3: 'beddress', 4: 'beddress', 5: 'beddress' } };
+  const tag = (site, k, pieces) => {
+    const role = ROLE[site.kind]?.[k];
+    if (role) for (const o of [pieces].flat(3)) if (o) o.userData.role = role;
+    return pieces;
+  };
   // what earlier levels built is put up silently when a level starts
   let quiet = false;
   const say = (...a) => quiet || sfx.play(...a);
@@ -556,6 +560,110 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     return g;
   }
 
+  // ---- the shop's tiers on the parts (tiers.js): each part's tier pieces for the stage it has got to, its own pieces that give
+  // way to them hidden, its materials restyled. Done when a level sets up its camp, after every stage built or undone, and
+  // when something is bought (setLook); pieces new since the last time pop up when fresh ----
+  const look = story.look || {};
+  function redress(site, fresh = false, extra = []) {
+    const d = (site.dress ||= { objs: new Map(), hidden: [], swapped: [] });
+    for (const o of d.hidden) o.visible = true;
+    d.hidden = [];
+    for (const [m, mat, sc, pos] of d.swapped) (m.material = mat), m.scale.copy(sc), m.position.copy(pos);
+    d.swapped = [];
+    const tier = site.tier || 0, base = [...(site.prebuilt || []), ...(site.history || []).flatMap((h) => h.pieces), ...extra];
+    const give = givesWay(site.kind, tier);
+    const sw = swapsFor(site.kind, tier);
+    for (const o of base) {
+      if (!o) continue;
+      if (give.includes(o.userData.role) && o.visible) {
+        o.visible = false;
+        d.hidden.push(o);
+      }
+      if ((o.userData.role === 'canvas' || o.userData.role === 'beddress') && Object.keys(sw).length) o.traverse((m) => {
+        if (!m.isMesh) return;
+        for (const [name, mat] of Object.entries(sw)) {
+          if (m.material !== M[name]) continue;
+          d.swapped.push([m, m.material, m.scale.clone(), m.position.clone()]);
+          m.material = mat;
+          // (the beds' plaid blanket: bigger than the folded one, to the foot of the bed and no further: it reached the fire's logs)
+          if (name === 'blanket') m.scale.set(1.1, 1, 1.45);
+        }
+      });
+    }
+    const want = dressFor(site.kind, tier, site.stage, { beds, made });
+    const keys = new Set(want.map((x) => x[0]));
+    for (const [k, o] of d.objs) if (!keys.has(k)) (scene.remove(o), d.objs.delete(k));
+    for (const [k, obj, a = 0, y = 0, b = 0, rot = 0, bed = null] of want) {
+      if (d.objs.has(k)) continue;
+      let o = obj;
+      if (obj === 'ridge') {
+        // the striped tent's flags along its ridge, end to end
+        const end = (bb) => site.pos.clone().addScaledVector(site.f, bb).setY(GROUND + 0.93);
+        o = ridgeFlags(end(-0.74), end(0.74));
+        scene.add(o);
+      } else if (bed) {
+        o.position.copy(bed.pos);
+        o.rotation.y = bed.yaw;
+        o.traverse((m) => m.isMesh && (m.castShadow = m.receiveShadow = true));
+        scene.add(o);
+      } else place(site, o, a, y, b, rot);
+      o.userData.dress = true;
+      if (fresh && !quiet) pop(o, 0.05, 0.25);
+      d.objs.set(k, o);
+    }
+  }
+  // the slots round the fire (tiers.js slotPieces): the string lights and the camp flag
+  const slots = new Map();
+  function reslot(fresh) {
+    const fire = sites.red;
+    const want = fire ? slotPieces(look.lights || 0, !!look.flag, (a, y, b) => fire.pos.clone().addScaledVector(fire.r, a).addScaledVector(fire.f, b).setY(GROUND + y),
+      sites.orange && sites.orange.pos.clone().addScaledVector(sites.orange.f, -0.74).setY(GROUND + 0.95), sites.green && sites.green.pos.clone().addScaledVector(sites.green.f, -0.45).setY(GROUND + 1.42)) : [];
+    const keys = new Set(want.map((x) => x[0]));
+    for (const [k, o] of slots) if (!keys.has(k)) (scene.remove(o), slots.delete(k));
+    for (const [k, o] of want) {
+      if (slots.has(k)) continue;
+      o.traverse((m) => m.isMesh && (m.castShadow = true));
+      scene.add(o);
+      if (fresh) pop(o, 0.05, 0.25);
+      slots.set(k, o);
+    }
+  }
+  // something bought (main.js): the camp takes its new look at once, the new pieces popping up
+  function setLook(next) {
+    Object.assign(look, next);
+    for (const site of Object.values(sites)) {
+      const t = look[site.kind] || 0;
+      if (t === (site.tier || 0)) continue;
+      site.tier = t;
+      redress(site, true);
+    }
+    for (const w of Object.values(workers)) if (w.camper.toolTier !== look.tools) {
+      w.camper.tool?.(look.tools || 0);
+      w.camper.toolTier = look.tools;
+    }
+    reslot(true);
+    if ((look.pet || null) !== petOut) {
+      if (petOut) extras.remove(petOut);
+      petOut = look.pet || null;
+      if (petOut) extras.reveal(petOut, 0.6);
+    }
+  }
+  // where the camera goes to show a thing just bought (main.js spotlight): its part's ground; the tools on the carpenter, the
+  // lights and the flag round the fire, a pet where it is; the board: the whole camp (null)
+  const SITE = { tent: 'orange', fire: 'red', beds: 'yellow', bench: 'green', water: 'blue', chest: 'purple' };
+  function spotOf(line, id) {
+    if (line === 'pet') return extras.where(id);
+    if (line === 'tools') {
+      const w = workers.green || Object.values(workers)[0];
+      return w ? { x: w.pos.x, z: w.pos.z, w: 1, d: 1, pet: true } : null;
+    }
+    const site = sites[SITE[line] || (line === 'lights' || line === 'flag' ? 'red' : '')];
+    if (!site) return null;
+    const wide = line === 'beds' || line === 'lights' || line === 'flag' || line === 'fire';
+    const c = line === 'beds' || line === 'lights' || line === 'flag' ? site.pos.clone().addScaledVector(site.f, -0.9) : site.pos;
+    return { x: c.x, z: c.z, w: wide ? 4.6 : 2.4, d: wide ? 3.2 : 2.2, near: true };
+  }
+
   // ---- the workers: one per part of the camp, busy at their own place (Oleg, 2026-11-07: "make the workers be busy at their
   // workplace instead of waiting at the gates - only when crate is dropped they come and get it. this way they will always be
   // visible"); a crate on their gate's mat and they run round the board for it ----
@@ -595,12 +703,14 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       for (let n = 0; n < (site.plan[k] || 1); n++) {
         const make = BUILD[site.kind][site.stage] || extra(site.kind);
         site.stage++;
-        make(site);
+        tag(site, site.stage - 1, make(site));
       }
     }
     for (let k = p0; k < pops.length; k++) Object.assign(pops[k], { t: 1, dusted: true });
     site.prebuilt = added.slice(a0);
     if (site.fire) site.fire.size = fireSize(site.stage);
+    site.tier = look[site.kind] || 0;
+    redress(site);
     quiet = false;
     const home = workSpot(site).setY(GROUND);
     const w = { color, site, camper, home, pos: home.clone(), heading: Math.atan2(site.pos.x - home.x, site.pos.z - home.z), queue: [], job: null, path: [], phase: s ? 'wait' : 'home', t: 0, done: !s, beat: Object.keys(workers).length * 2.3 };
@@ -634,6 +744,8 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       scene.add(w.blanket);
     }
     w.camper.root.position.copy(w.pos);
+    w.camper.tool?.(look.tools || 0);
+    w.camper.toolTier = look.tools;
     scene.add(w.camper.root);
     workers[color] = w;
   }
@@ -729,8 +841,21 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   function cancel(color, crate) {
     const w = workers[color];
     w.queue = w.queue.filter((j) => j.crate !== crate);
-    for (const job of [w.job, ...(w.done ? [] : [])]) {
-      if (!job || job.crate !== crate) continue;
+    // what a crate built comes down, and it no longer counts
+    const takeDown = (pieces, stages) => {
+      for (const o of pieces) scene.remove(o);
+      w.site.stage -= stages;
+      w.site.got--;
+      if (w.site.kind === 'fire' && w.site.stage < 3 && w.site.fire) w.site.fire = null;
+      if (w.site.fire) w.site.fire.size = fireSize(w.site.stage);
+      if (w.site.kind === 'water' && w.site.stage < 3) w.site.level = 0;
+      redress(w.site);
+    };
+    const job = w.job;
+    if (job && job.crate === crate) {
+      // the crate in hand, or being built with: undone while the worker was still at it (QA 2026-11-14, RULES-2: the stages
+      // built so far stayed standing and the site went on counting the crate, so the camp got ahead of the crates delivered)
+      if (job.stagesLeft !== undefined) takeDown(job.pieces, job.stages || 0);
       w.job = null;
       w.path = route(w.pos, w.home);
       w.phase = 'return';
@@ -738,12 +863,8 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     }
     const built = w.site.history?.find((h) => h.crate === crate);
     if (built) {
-      for (const o of built.pieces) scene.remove(o);
-      w.site.stage -= built.stages;
-      w.site.got--;
       w.site.history = w.site.history.filter((h) => h !== built);
-      if (w.site.kind === 'fire' && w.site.stage < 3 && w.site.fire) w.site.fire = null;
-      if (w.site.kind === 'water' && w.site.stage < 3) w.site.level = 0;
+      takeDown(built.pieces, built.stages);
       w.done = false;
       w.path = route(w.pos, w.home);
       w.phase = 'return';
@@ -1033,8 +1154,9 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
         w.job.stagesLeft--;
         const make = BUILD[site.kind][site.stage] || extra(site.kind);
         site.stage++;
-        const pieces = (make(site) || []).flat().filter(Boolean);
+        const pieces = (tag(site, site.stage - 1, make(site)) || []).flat().filter(Boolean);
         w.job.pieces.push(...pieces);
+        redress(site, true, w.job.pieces);
         w.job.stages = (w.job.stages || 0) + 1;
         sfx.build(site.kind);
         if (site.fire) site.fire.size = fireSize(site.stage);
@@ -1122,9 +1244,12 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     && keep.every((k) => k.gap(x, z) > 0.35);
   const points = [];
   for (let x = area[0]; x <= area[1]; x += 0.5) for (let z = area[2]; z <= area[3]; z += 0.5) if (free(x, z)) points.push([x, z]);
-  const extras = makeExtras(scene, models, { ox: board.ox, oz: board.oz, w: board.W, h: board.H, signs }, story.size, portrait, story.extras || [], fx, { points, free });
+  const extras = makeExtras(scene, models, { ox: board.ox, oz: board.oz, w: board.W, h: board.H, signs }, story.size, portrait, look.pet ? [look.pet] : [], fx, { points, free });
+  let petOut = look.pet || null;
+  reslot(false);
 
-  function update(dt, t, dusk, state, moves = 0, onBoard = null) {
+  // quiet: the camera is showing a new thing for the camp (main.js spotlight): no countdown tags, they could stand in front of it
+  function update(dt, t, dusk, state, moves = 0, onBoard = null, quiet = false) {
     for (const w of Object.values(workers)) {
       if (!w.door) continue;
       w.bedtime = moves >= w.closeAt;
@@ -1134,7 +1259,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       // on the gate itself, big (playtest 2026-10-24: the number over a small worker off the board was missed)
       const sp = spots[w.color];
       // (none once the crew's crates are all out: playtest 2026-10-29, a "1" left on a gate looked like a job still to do)
-      w.tag.visible = (w.openAt != null ? w.late : !w.bedtime) && state === 'play' && (!onBoard || onBoard.has(w.color));
+      w.tag.visible = (w.openAt != null ? w.late : !w.bedtime) && state === 'play' && !quiet && (!onBoard || onBoard.has(w.color));
       // (a gate on the far side: up over its banner, board.js, so the number never covers the gate's sign)
       // (and on the near side further out, and lower: standing up there it reaches up the screen over the last row; the tags
       // grew in the playtest of 2026-11-09, and a gate mark must never cover a crate)
@@ -1176,8 +1301,10 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     extras.update(dt, t, dusk, state);
   }
 
+  // a site's tier pieces that stand up (for the checks: the rugs and the paved circle lie flat under things)
+  const dressOf = (site) => [...(site.dress?.objs.values() || [])].filter((o) => !o.userData.flat && o.parent);
   return {
-    sites, arrived, cancel, update, extras,
+    sites, arrived, cancel, update, extras, setLook, spotOf,
     // for checks: each worker's phase, job and bedtime
     // the countdown tags on show, for a tap on one to be explained (main.js): its crew, whether it is back late or to bed early,
     // the moves it shows, and where it is
@@ -1193,7 +1320,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     // PLAN (tools/check-camp.js)
     reach: () => Object.fromEntries(Object.entries(sites).map(([color, site]) => {
       const ab = [Infinity, -Infinity, Infinity, -Infinity], v = new THREE.Vector3();
-      for (const o of [...(site.prebuilt || []), ...(site.history || []).flatMap((h) => h.pieces)]) {
+      for (const o of [...(site.prebuilt || []), ...(site.history || []).flatMap((h) => h.pieces), ...dressOf(site)]) {
         if (!o.parent || !o.visible) continue;
         o.updateWorldMatrix(true, true);
         o.traverseVisible((m) => {
@@ -1215,7 +1342,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     // placed as it stands ({ color, kind, pts: [[x, z] x 8] })
     boxes: () => [...extras.boxes(), ...Object.entries(sites).flatMap(([color, site]) => {
       const out = [], v = new THREE.Vector3();
-      for (const o of [...(site.prebuilt || []), ...(site.history || []).flatMap((h) => h.pieces)]) {
+      for (const o of [...(site.prebuilt || []), ...(site.history || []).flatMap((h) => h.pieces), ...dressOf(site)]) {
         if (!o.parent || !o.visible) continue;
         o.updateWorldMatrix(true, true);
         o.traverseVisible((m) => {

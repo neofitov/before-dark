@@ -39,6 +39,8 @@ export function buildBoard(scene, models, L, opts = {}) {
   const group = new THREE.Group();
   scene.add(group);
   const wood = woodMaterial('#9a6a3c', 11), woodDark = woodMaterial('#6e4826', 12);
+  // the frame's pieces, for the board's tiers from the shop (setTier)
+  const frame = { planks: [], posts: [], gatePosts: [] };
 
   // the slab of earth under the tray and the tiles
   const slab = new THREE.Mesh(new RoundedBoxGeometry(W + 0.5, 0.24, H + 0.5, 2, 0.06), new THREE.MeshStandardMaterial({ color: 0x6b5236, roughness: 1 }));
@@ -72,6 +74,7 @@ export function buildBoard(scene, models, L, opts = {}) {
     p.rotation.y = (r.next() - 0.5) * 0.02;
     p.castShadow = p.receiveShadow = true;
     group.add(p);
+    frame.planks.push(p);
   };
   for (let k = 0; k < W; k++) {
     if (!inGate('top', k)) addPlank(plankX, ox + k + 0.5, oz - 0.12);
@@ -87,6 +90,7 @@ export function buildBoard(scene, models, L, opts = {}) {
     p.position.set(x, GROUND + 0.31, z);
     p.castShadow = p.receiveShadow = true;
     group.add(p);
+    frame.posts.push(p);
   }
 
   // a pond in a corner (2026-10-28, odd boards): water where its tiles would be, lily pads, reeds along its edges
@@ -121,6 +125,7 @@ export function buildBoard(scene, models, L, opts = {}) {
       post.position.set(ex + out[0] * 0.12, GROUND + 0.4, ez + out[1] * 0.12);
       post.castShadow = post.receiveShadow = true;
       group.add(post);
+      frame.gatePosts.push(post);
       const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, poleLen, 8), woodDark);
       pole.position.set(post.position.x, GROUND + 0.75 + poleLen / 2, post.position.z);
       pole.castShadow = true;
@@ -441,7 +446,68 @@ export function buildBoard(scene, models, L, opts = {}) {
     }
   }
 
-  return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, mark, aim, way, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
+  // the board's tiers from the shop (shop.js; 2026-11-14, Oleg: "board upgrades that dont block player vision - colors,
+  // materials"): the frame's wood, caps on its corner posts and the tiles' finish, nothing over the cells. 1: honey varnish,
+  // brass caps, warmer tiles; 2: a frame painted green, cream posts, tiles in two soft tones (the cells count easily);
+  // 3: dark walnut with a gold line along the top, gold caps and knobs, pale stone tiles
+  // (a tier set again changes nothing; the old caps, knobs and lines are freed: every buy and pet brought out set the tier,
+  // and each time their geometries leaked, QA 2026-11-14, ROBUST-2)
+  let tierBits = [], tileColors = null, tileMat0 = tiles.material, tierNow = 0;
+  function setTier(t) {
+    t = t || 0;
+    if (t === tierNow) return;
+    tierNow = t;
+    for (const o of tierBits) {
+      group.remove(o);
+      o.geometry.dispose();
+    }
+    tierBits = [];
+    tileColors ||= tiles.instanceColor && tiles.instanceColor.array.slice();
+    const paint = (list, m) => list.forEach((p) => (p.material = m));
+    if (!t) {
+      frame.planks.forEach((p) => (p.material = p.userData.wood0 ||= p.material));
+      paint([...frame.posts, ...frame.gatePosts], woodDark);
+    } else {
+      for (const p of frame.planks) p.userData.wood0 ||= p.material;
+      paint(frame.planks, tierMat(`frame${t}`));
+      paint([...frame.posts, ...frame.gatePosts], tierMat(`post${t}`));
+      for (const p of frame.posts) {
+        const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.19, 0.09, 4), tierMat(`cap${t}`));
+        cap.position.set(p.position.x, p.position.y + 0.35, p.position.z);
+        cap.rotation.y = Math.PI / 4;
+        tierBits.push(cap);
+        if (t === 3) {
+          const knob = new THREE.Mesh(new THREE.SphereGeometry(0.075, 12, 8), tierMat('cap3'));
+          knob.position.set(p.position.x, p.position.y + 0.44, p.position.z);
+          tierBits.push(knob);
+        }
+      }
+      if (t === 3) for (const p of frame.planks) {
+        const b = new THREE.Box3().setFromBufferAttribute(p.geometry.attributes.position).getSize(new THREE.Vector3()), along = b.x > b.z;
+        const line = new THREE.Mesh(new THREE.BoxGeometry(along ? 1.0 : 0.05, 0.015, along ? 0.05 : 1.0), tierMat('cap3'));
+        line.position.set(p.position.x, p.position.y + 0.235, p.position.z);
+        tierBits.push(line);
+      }
+      for (const o of tierBits) (o.castShadow = true), group.add(o);
+    }
+    // the tiles: those of a plain cell (not a wall's earth, not a gate's paint) take the tier's finish
+    if (tileColors) {
+      tiles.instanceColor.array.set(tileColors);
+      const c = new THREE.Color(), base = new THREE.Color('#dcc38e');
+      if (t) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const k = y * W + x;
+        tiles.getColorAt(k, c);
+        if (Math.abs(c.r - base.r) + Math.abs(c.g - base.g) + Math.abs(c.b - base.b) > 0.25) continue;
+        if (t === 1) c.lerp(new THREE.Color('#ecd29a'), 0.75);
+        if (t === 2) c.set((x + y) % 2 ? '#d8bc84' : '#e9d6a4');
+        if (t === 3) c.set((x + y) % 2 ? '#e2d6bc' : '#ece2cc');
+        tiles.setColorAt(k, c);
+      }
+      tiles.instanceColor.needsUpdate = true;
+    }
+    tiles.material = t === 3 ? tierMat('stoneTiles') : tileMat0;
+  }
+  return { group, spots, flags, arches, doors, ox, oz, W, H, flash, tick, mark, aim, way, setTier, center: (x, y, w, h) => new THREE.Vector3(ox + x + w / 2, 0, oz + y + h / 2) };
 }
 
 // a soft shadow the shape of a w x h crate's footprint (in cells; a crate stands 0.06 in from its cells' edges), fading out
@@ -851,6 +917,53 @@ export function stencilCanvas(icon, worn = true) {
 }
 
 // plain wood with grain streaks
+// the board tiers' materials (setTier), made once. (Bright, little metalness: the scene has no reflections to show, so real
+// metal renders nearly black)
+const tierMats = {};
+function tierMat(name) {
+  if (tierMats[name]) return tierMats[name];
+  const std = (color, x = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, ...x });
+  const paint = () => {
+    const m = new THREE.MeshStandardMaterial({ roughness: 0.7, map: canvasTex(128, (g, s) => {
+      g.fillStyle = '#3f6e4c';
+      g.fillRect(0, 0, s, s);
+      g.fillStyle = 'rgba(255,255,255,0.06)';
+      for (let k = 0; k < 18; k++) g.fillRect(0, (k * s) / 18, s, 1);
+      g.fillStyle = '#f3e6c8';
+      g.fillRect(0, 0, s, s * 0.12);
+    }) });
+    return m;
+  };
+  const stone = () => new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75, map: canvasTex(128, (g, s) => {
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, s, s);
+    let seed = 11;
+    const R = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let k = 0; k < 9; k++) {
+      g.strokeStyle = `rgba(150,130,100,${0.12 + R() * 0.12})`;
+      g.lineWidth = 1 + R();
+      g.beginPath();
+      let x = R() * s, y = R() * s;
+      g.moveTo(x, y);
+      for (let n = 0; n < 4; n++) g.lineTo((x += (R() - 0.5) * 50), (y += (R() - 0.5) * 50));
+      g.stroke();
+    }
+  }) });
+  const make = {
+    frame1: () => Object.assign(woodMaterial('#c0803a', 61), { roughness: 0.5 }),
+    frame2: paint,
+    frame3: () => Object.assign(woodMaterial('#4e301c', 63), { roughness: 0.45 }),
+    post1: () => woodMaterial('#7a4a24', 62),
+    post2: () => std(0xf1e4c4),
+    post3: () => woodMaterial('#3e2414', 64),
+    cap1: () => std(0xd8a048, { metalness: 0.25, roughness: 0.35, emissive: 0x3a2400, emissiveIntensity: 0.3 }),
+    cap2: () => std(0x3f6e4c),
+    cap3: () => std(0xffd040, { metalness: 0.3, roughness: 0.25, emissive: 0x8a6000, emissiveIntensity: 0.55 }),
+    stoneTiles: stone,
+  };
+  return (tierMats[name] = make[name]());
+}
+
 export function woodMaterial(base, seed) {
   const r = rng(seed);
   const map = canvasTex(256, (g, s) => {

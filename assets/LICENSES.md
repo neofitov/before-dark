@@ -12,9 +12,7 @@ except the music (see Music). The one library, three.js, is MIT (see the end).
 | Animals (Deer) | Quaternius | CC0 1.0 | models/deer (converted to GLB; animations Idle, Idle_2, Idle_Headlow, Eating, Walk kept) |
 | Ultimate Animated Animal Pack (Fox) | Quaternius (via poly.pizza/m/Bc97C66HKi) | CC0 1.0 | models/fox (GLB slimmed by tools/slim-glb.mjs to the clips Attack, Eating, Gallop, Jump_ToIdle, Walk, Idle_2_HeadLow, Idle_2, Idle; downloaded 2026-10-24 with Oleg's yes) |
 | Mini Characters 1.0 | Kenney | CC0 1.0 | models/people/character-male-a, male-b, male-e, female-b, female-c, female-f, Textures/colormap.png (downloaded 2026-10-24 with Oleg's yes; the 'Kenney' campers) |
-| Cube Pets 2.0 | Kenney | CC0 1.0 | models/shop/pets/animal-chick, bunny, cat, beaver, dog, parrot (GLB, their animations), pets/Textures/colormap.png: the camp shop's pets (downloaded 2026-11-14 with Oleg's yes) |
-| Nature Kit (GLB models) | Kenney | CC0 1.0 | models/shop/tent_detailedOpen, log_stackLarge, crops_cornStageD, crops_wheatStageB: the shop's big tent, log stack, veggie patch |
-| Halloween Bits 1.0 | KayKit (Kay Lousberg, www.kaylousberg.com) | CC0 1.0 | models/shop/kaykit/: pumpkin_orange_jackolantern, pumpkin_orange_small, pumpkin_yellow_small, lantern_standing, post_lantern, bench, candle_triple (glTF + bin), halloweenbits_texture.png: the shop's pumpkins, big lantern, lamp post, bench, candles |
+| Cube Pets 2.0 | Kenney | CC0 1.0 | models/shop/pets/animal-chick, cat, dog, parrot (GLB, their animations), pets/Textures/colormap.png: the camp shop's pets (downloaded 2026-11-14 with Oleg's yes) |
 | RPG Audio | Kenney | CC0 1.0 | sfx/ (2D): exit, win, fail, pick, clear, grow; sfx3d/cloth1 (cloth2), coins1 (handleCoins), latch1 (metalLatch), chop1 (chop), leather1 (dropLeather), cloth2-4 (cloth1, cloth3, cloth4), coins2 (handleCoins2), book1-2 (bookPlace1-2), click1 (metalClick), as mp3. No creak or door sounds, no metal pot (Oleg; pot1, metalPot1, removed 2026-11-14). |
 | Impact Sounds | Kenney | CC0 1.0 | sfx/ (2D): slide, place; sfx3d/pick1-3 (impactWood_light_000, 002, 004), drop1-3 (impactWood_medium_000, 002, 004), heavy1 (impactWood_heavy_001), bump1-2 (impactPlank_medium_000, 003), stone1-3 (impactMining_000, 001, 003), thud1-3 (impactWood_heavy_000, 002, 003), tap1-3 (impactMetal_light_000, 002, 004), plank1-2 (impactPlank_medium_001, 002), soft1-2 (impactSoft_medium_000, 002), glass1 (impactGlass_light_001), as mp3 |
 
@@ -49,5 +47,5 @@ The loading pictures (`ui/loader-wide.jpg`, `loader-tall.jpg`, `loader-phone.jpg
 `tools/cover-drawn.js`; their title is set in Lilita One (Juan Montoreano, SIL Open Font License 1.1, from Google Fonts;
 `tools/fonts/LilitaOne-OFL.txt`). Only the pictures ship with the game, not the font.
 
-The shop's pictures (`ui/shop/*.png`, 2026-11-14) are renders of these models and of the camp's extras (made in code), by
-`tools/shop-icons.js`.
+The shop's pictures (`ui/shop/*.png`, 2026-11-14) are renders by `tools/shop-icons.js`: of the pets' models, of the camp's
+parts with each upgrade on (made in code: `src/three/tiers.js`, `board.js`), and of the tools, the lights and the flag.

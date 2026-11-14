@@ -1,6 +1,6 @@
 // The camp trail: the level map (benchmark 2026-10-28, item 2). The levels are stops along a winding forest trail, each with
 // the stars won there; and the camp shop (shop.js, 2026-11-14): the coins, and what they buy for the camp.
-import { ITEMS, nextItem } from './shop.js';
+import { ITEMS, blurb } from './shop.js';
 
 // the extras' icons, flat, 40 x 40
 export const ICON = {
@@ -51,20 +51,40 @@ export function drawTrail(box, { count, best, open, current, pick }) {
   });
 }
 
-// the shop: a tile for each thing, cheapest first; what the coins buy now lit, its price on it; what the camp has ticked; and
-// a line about the cheapest thing still to buy. buy(id) when one is pressed
-export function drawShop(box, line, { owned, coins, buy }) {
-  const next = nextItem(owned);
+// the shop (2026-11-14, the upgrades: shop.js): a tile for each line (its next tier's picture, the line's name, a dot for each
+// tier with the ones bought lit, the price, or the level it opens at) and each pet. A tile buys nothing: pressing it shows the
+// thing big at the top of the shop, with its Buy (iPhone test 2026-11-14, Oleg: a Buy straight from the win card "was too fast,
+// didn't understand I was buying something and no sense of reward"). tiles: main.js shopTiles; sel: the one shown
+const LOCK = '<svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true"><rect x="4" y="9" width="12" height="9" rx="2" fill="currentColor"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9" stroke="currentColor" stroke-width="2" fill="none"/></svg>';
+const dots = (have, of) => (of > 1 ? `<span class="dots">${Array.from({ length: of }, (_, k) => `<i class="${k < have ? 'on' : ''}"></i>`).join('')}</span>` : '');
+export function drawShop(box, { tiles, coins, sel, pick }) {
   box.innerHTML = '';
-  for (const it of ITEMS) {
-    const has = owned.includes(it.id), can = !has && coins >= it.price, b = document.createElement('button');
-    b.className = `ex${has ? ' has' : can ? ' can' : ' no'}${next && next.id === it.id ? ' next' : ''}`;
-    b.innerHTML = `${icon(it.id)}<div>${it.name}</div><div class="cost">${has ? '✓ in the camp' : `${COIN(13)} ${it.price}`}</div>`;
-    b.disabled = !can;
-    b.title = has ? `${it.name}: in the camp` : can ? `Buy the ${it.name.toLowerCase()} for ${it.price} coins` : `${it.name}: ${it.price} coins`;
-    if (can) b.onclick = () => buy(it.id);
+  for (const x of tiles) {
+    const can = !x.done && x.open && coins >= x.it.price, b = document.createElement('button');
+    b.className = `ex${x.done ? ' has' : !x.open ? ' locked' : can ? ' can' : ' no'}${sel === x.key ? ' sel' : ''}`;
+    const cost = x.done ? (x.out === false ? 'bought' : '✓ in the camp') : !x.open ? `${LOCK} level ${x.it.open}` : `${COIN(13)} ${x.it.price}`;
+    b.innerHTML = `${icon(x.it.id)}<div>${x.title}</div>${dots(x.have, x.of)}<div class="cost">${cost}</div>`;
+    b.title = x.title;
+    b.onclick = () => pick(x.key);
     box.append(b);
   }
-  line.innerHTML = !next ? 'Everything is in the camp!' : coins >= next.price ? `Pick something for the camp: it stands in every level`
-    : `<b>${next.price - coins}</b> more coins for the ${next.name.toLowerCase()}<div class="bar"><i style="width:${Math.round((100 * coins) / next.price)}%"></i></div>`;
+}
+
+// the thing shown at the top of the shop: its picture, big; its line and tier, what it does; and its Buy when the coins are
+// enough and the levels have got there, else how many coins more it needs, or the level it opens at; or that the camp has it
+// (a pet bought but not out: bring it out)
+export function drawFeature(box, x, { coins, buy, bringOut }) {
+  box.classList.remove('got');
+  const it = x.it, can = !x.done && x.open && coins >= it.price;
+  const head = it.line === 'pet' ? it.name : `${x.title}: ${it.name}`;
+  const tierLine = x.of > 1 ? `<div class="tierline">${dots(x.have, x.of)} tier ${Math.min(x.have + (x.done ? 0 : 1), x.of)} of ${x.of}</div>` : '';
+  let act;
+  if (x.done && it.line === 'pet' && !x.out) act = '<button class="buyBtn out">Bring it out</button>';
+  else if (x.done) act = `<div class="owned">✓ ${x.of > 1 ? 'Every tier in the camp' : 'In the camp'}</div>`;
+  else if (!x.open) act = `<div class="need">${LOCK} Opens at level ${it.open}</div>`;
+  else if (can) act = `<button class="buyBtn">Buy for ${COIN(18)} ${it.price}</button>`;
+  else act = `<div class="need">${COIN(15)} ${it.price} · <b>${it.price - coins}</b> more to go</div><div class="bar"><i style="width:${Math.round((100 * coins) / it.price)}%"></i></div>`;
+  box.innerHTML = `<div class="pic">${icon(it.id, 96)}</div><div class="info"><div class="name">${head}</div>${tierLine}<div class="blurb">${blurb(it)}</div>${act}</div>`;
+  const b = box.querySelector('.buyBtn');
+  if (b) b.onclick = () => (b.classList.contains('out') ? bringOut(it.id) : buy(it.id));
 }
