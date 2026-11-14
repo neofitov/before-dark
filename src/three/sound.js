@@ -13,7 +13,7 @@ const TRACK = 'assets/music/camp-piano.mp3', STING = { voice: 'piano', room: 'sm
 
 const FILES = {
   pick: ['pick1', 'pick2', 'pick3'], drop: ['drop1', 'drop2', 'drop3'], heavy: ['heavy1'], bump: ['bump1', 'bump2'],
-  cloth: ['cloth1', 'cloth2', 'cloth3', 'cloth4'], coins: ['coins1', 'coins2'], latch: ['latch1'], chop: ['chop1'], leather: ['leather1'], pot: ['pot1'],
+  cloth: ['cloth1', 'cloth2', 'cloth3', 'cloth4'], coins: ['coins1', 'coins2'], latch: ['latch1'], chop: ['chop1'], leather: ['leather1'],
   stone: ['stone1', 'stone2', 'stone3'], thud: ['thud1', 'thud2', 'thud3'], tap: ['tap1', 'tap2', 'tap3'], plank: ['plank1', 'plank2'],
   soft: ['soft1', 'soft2'], glass: ['glass1'], book: ['book1', 'book2'], click: ['click1'],
 };

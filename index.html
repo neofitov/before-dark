@@ -147,8 +147,12 @@
     #card.won .row button:first-child { font-size: 18px; padding: 14px 28px; background: linear-gradient(#5cc753, #3e9e38);
       box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.2); }
     /* the warm-up's first win: "Next level" fills from the left and goes on by itself when full (main.js flow) */
-    #card button.auto { position: relative; overflow: hidden; }
-    #card button.auto::before { content: ''; position: absolute; inset: 0; background: rgba(255, 255, 255, 0.28); transform-origin: left;
+    #card button.auto, #intro .go.auto { position: relative; overflow: hidden; }
+    /* "Wait": a won card's or a level card's countdown stopped, to stay and read (Oleg, 2026-11-14) */
+    #card .wait, #intro .wait { display: block; margin: 8px auto 0; padding: 4px 12px; border: 0; background: none; color: rgba(255, 255, 255, 0.72);
+      font: 700 14px system-ui, sans-serif; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+    #card .wait[hidden], #intro .wait[hidden] { display: none; }
+    #card button.auto::before, #intro .go.auto::before { content: ''; position: absolute; inset: 0; background: rgba(255, 255, 255, 0.28); transform-origin: left;
       transform: scaleX(0); animation: autoFill var(--fill, 3s) linear forwards; }
     @keyframes autoFill { to { transform: scaleX(1); } }
     /* a short screen (CrazyGames' smaller frames are 462 px tall): a compact card, so the camp above it stays big */
@@ -235,12 +239,45 @@
     #map .next .bar { height: 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.35); overflow: hidden; margin-top: 5px; }
     #map .next .bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #ffc46a, #ffe08a); }
     #map .extras { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
-    #map .ex { background: rgba(0, 0, 0, 0.24); border-radius: 14px; padding: 7px 3px 6px; text-align: center; font-size: 12px; font-weight: 700; line-height: 1.25; }
-    #map .ex svg { display: block; margin: 0 auto 3px; }
-    #map .ex .cost { color: #ffd24a; font-size: 11px; }
+    /* the camp shop (shop.js, 2026-11-14): a tile per thing; what the coins buy now lit and pressable, its price on it */
+    #map .shopHead { display: flex; align-items: center; gap: 10px; }
+    #map .purse { display: inline-flex; align-items: center; gap: 5px; font-size: 16px; color: #ffd24a; background: rgba(0, 0, 0, 0.28); padding: 3px 11px 3px 6px; border-radius: 999px; }
+    #map .ex { background: rgba(0, 0, 0, 0.24); border: 0; border-radius: 14px; padding: 7px 3px 6px; text-align: center; font: 700 12px/1.25 system-ui, sans-serif; color: #fff; }
+    #map .ex > svg, #map .ex > img { display: block; margin: 0 auto 3px; }
+    #map .ex .cost { color: #ffd24a; font-size: 11px; display: flex; align-items: center; justify-content: center; gap: 3px; }
     #map .ex.no { color: rgba(255, 255, 255, 0.55); }
-    #map .ex.no svg { filter: grayscale(1) brightness(0.75); opacity: 0.6; }
-    #map .ex.next { box-shadow: inset 0 0 0 2px #ffd24a; color: #fff; }
+    #map .ex.no > svg, #map .ex.no > img { filter: grayscale(1) brightness(0.75); opacity: 0.6; }
+    #map .ex.has .cost { color: #a8e08a; }
+    #map .ex.can { background: linear-gradient(#5aa84a, #3e8a34); box-shadow: 0 3px 0 #2c6a24; cursor: pointer; }
+    #map .ex.can:hover { filter: brightness(1.08); }
+    #map .ex.can:active { transform: translateY(2px); box-shadow: 0 1px 0 #2c6a24; }
+    #map .ex.can .cost { color: #fff2b0; }
+    #map .ex.next:not(.can) { box-shadow: inset 0 0 0 2px #ffd24a; color: #fff; }
+    /* the win card's shop strip (2026-11-14, Oleg: the coin line "looks like a tooltip"): the coins won, the best thing they
+       buy with its picture and a Buy, or the next thing with how far off it is */
+    #cardExtra .shopStrip { display: flex; align-items: center; gap: 10px; margin: 2px auto 0; padding: 7px 8px 7px 7px; max-width: 330px; text-align: left;
+      border-radius: 16px; background: rgba(0, 0, 0, 0.28); box-shadow: inset 0 0 0 1.5px rgba(255, 210, 74, 0.25); }
+    #cardExtra .shopStrip.can { background: linear-gradient(135deg, rgba(90, 168, 74, 0.38), rgba(40, 90, 40, 0.38)); box-shadow: inset 0 0 0 2px #7fd06a;
+      animation: stripGlow 1.8s ease-in-out infinite; }
+    @keyframes stripGlow { 50% { box-shadow: inset 0 0 0 2px #b8f09a, 0 0 18px rgba(127, 208, 106, 0.55); } }
+    #cardExtra .pic { flex: none; width: 52px; height: 52px; border-radius: 12px; background: rgba(255, 255, 255, 0.1); display: grid; place-items: center; cursor: pointer; }
+    #cardExtra .shopStrip:not(.can) .pic img { filter: grayscale(0.6) brightness(0.85); }
+    #cardExtra .txt { flex: 1; min-width: 0; display: grid; gap: 2px; }
+    #cardExtra .earn { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #ffe7a8; }
+    #cardExtra .earn b { color: #ffd24a; font-size: 17px; }
+    #cardExtra .what { font-size: 13px; color: #fff; display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+    #cardExtra .bar { height: 7px; border-radius: 999px; background: rgba(0, 0, 0, 0.35); overflow: hidden; margin-top: 2px; }
+    #cardExtra .bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #ffc46a, #ffe08a); }
+    #card #cardExtra button { flex: none; padding: 10px 16px; font-size: 16px; border-radius: 12px; }
+    #card #cardExtra button.buy { background: linear-gradient(#62c04e, #3e9a34); box-shadow: 0 3px 0 #2c6a24; }
+    #card #cardExtra button.shop { background: #6b5f80; }
+    .btn.pill.coins { position: relative; }
+    .btn.pill.coins svg { flex: none; }
+    /* the coin pill while the coins buy something: it glows, a green badge on its corner */
+    .btn.pill.coins.can { animation: coinCall 1.6s ease-in-out infinite; box-shadow: 0 0 0 2px #ffd24a; }
+    .btn.pill.coins.can::after { content: '+'; position: absolute; top: -6px; right: -6px; width: 19px; height: 19px; border-radius: 50%; background: #4cba3c;
+      color: #fff; font: 900 15px/19px system-ui, sans-serif; text-align: center; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.35); }
+    @keyframes coinCall { 50% { box-shadow: 0 0 0 2px #ffe08a, 0 0 18px 4px rgba(255, 210, 74, 0.75); transform: scale(1.06); } }
     #map .go { display: block; margin: 14px auto 0; border: 0; border-radius: 14px; padding: 13px 30px; font-size: 18px; font-weight: 800; color: #fff; cursor: pointer;
       background: linear-gradient(#5cc753, #3e9e38); box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.2); }
     /* a wide screen: the trail beside the extras */
@@ -252,6 +289,11 @@
     #pills { position: fixed; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; }
     #pills button { border: 0; border-radius: 999px; padding: 7px 12px;
       font-size: 13px; font-weight: 700; color: #fff; background: rgba(20, 22, 40, 0.55); cursor: pointer; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+    /* a phone: the coin pill (2026-11-14) under the stars and the gear, out of their row (the three side by side ran off a
+       375 px screen; the level's lines in the middle leave the row about 100 px) */
+    @media (max-width: 480px) {
+      #hud .btn.pill.coins { position: absolute; right: 12px; top: calc(max(10px, env(safe-area-inset-top)) + 46px); pointer-events: auto; }
+    }
     @media (max-width: 420px) { #level { font-size: 17px; } #moves { font-size: 14px; } .btn { width: 40px; height: 40px; }
       .btn.lab { width: 46px; height: 48px; font-size: 19px; } .btn.lab small { font-size: 10px; } #best { font-size: 15px; padding: 2px 10px 3px; } }
     /* a phone: one line each for the moves, the hint and the end card's buttons (playtest 2026-10-29, Maya at 390 px:
@@ -313,7 +355,7 @@
   <div id="hud">
     <div class="btns"><button class="btn lab" id="restart" title="Restart">↺<small>Restart</small></button><button class="btn lab" id="undo" title="Undo">↶<small>Undo</small></button></div>
     <div class="mid"><div id="level">Level</div><div id="moves"><span class="sun"></span><span id="movesText"></span></div><div id="best"></div></div>
-    <div class="btns"><button class="btn pill" id="trail" title="Camp trail"><span>★</span><b id="starTotal">0</b></button><button class="btn" id="gear" title="Settings">⚙</button></div>
+    <div class="btns"><button class="btn pill" id="trail" title="Camp trail"><span>★</span><b id="starTotal">0</b></button><button class="btn pill coins" id="coins" title="Camp shop"><svg class="coin" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#e9a72a"/><circle cx="10" cy="10" r="7" fill="#ffd24a"/><path d="M10 5.5l1.3 2.9 3.1.3-2.4 2 .7 3.1L10 12.2l-2.7 1.6.7-3.1-2.4-2 3.1-.3z" fill="#e9a72a"/></svg><b id="coinTotal">0</b></button><button class="btn" id="gear" title="Settings">⚙</button></div>
   </div>
   <div id="ember"><div class="orb"></div><div class="body"><div class="who">Ember<span class="state">thinking</span></div><div class="say"></div><div class="facts"></div><div class="why"></div></div></div>
   <div id="hint"><div class="orb"></div><div class="text"></div></div>
@@ -345,11 +387,12 @@
     <div class="camp">Tonight's crates:</div>
     <div class="legend" id="introLegend"></div>
     <button class="go" id="introGo">Let's go</button>
+    <button class="wait" id="introWait" hidden>Wait</button>
   </div></div>
   <!-- the first level's teaching hand (main.js teach()) -->
   <div id="hand"><svg viewBox="0 0 64 72" width="56" height="63"><path d="M22 8c0-4 7-4 7 0v24c0-3 7-3 7 0v4c0-3 7-3 7 0v4c0-3 7-3 7 0v14c0 9-6 14-15 14h-6c-6 0-9-3-12-8l-9-15c-2-4 3-7 6-4l8 9V8z" fill="#fff" stroke="#2a2235" stroke-width="3.5" stroke-linejoin="round"/></svg></div>
   <div id="unlockNote"></div>
-  <div id="card"><div class="box"><h2 id="cardTitle"></h2><div class="stars" id="cardStars"></div><p id="cardText"></p><div id="cardExtra"></div><div class="row" id="cardBtns"></div></div></div>
+  <div id="card"><div class="box"><h2 id="cardTitle"></h2><div class="stars" id="cardStars"></div><p id="cardText"></p><div id="cardExtra"></div><div class="row" id="cardBtns"></div><button class="wait" id="cardWait" hidden>Wait</button></div></div>
   <div id="settings"><div class="box">
     <h2>Settings</h2>
     <button class="toggle" id="setSound">Sound <b>on</b></button>
@@ -364,7 +407,7 @@
     <div class="top"><h2>Camp trail</h2><div class="total">★ <b id="mapTotal">0</b><span> / <span id="mapMax">0</span></span></div><button class="x" id="mapClose" title="Close">✕</button></div>
     <div class="cols">
       <div class="trail" id="mapTrail"></div>
-      <div><h3>The camp's extras</h3><div class="next" id="mapNext"></div><div class="extras" id="mapExtras"></div></div>
+      <div><h3 class="shopHead">Camp shop <span class="purse"><svg class="coin" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#e9a72a"/><circle cx="10" cy="10" r="7" fill="#ffd24a"/><path d="M10 5.5l1.3 2.9 3.1.3-2.4 2 .7 3.1L10 12.2l-2.7 1.6.7-3.1-2.4-2 3.1-.3z" fill="#e9a72a"/></svg><b id="mapCoins">0</b></span></h3><div class="next" id="mapNext"></div><div class="extras" id="mapExtras"></div></div>
     </div>
     <button class="go" id="mapPlay">Play</button>
   </div></div>

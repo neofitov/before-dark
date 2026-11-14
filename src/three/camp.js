@@ -12,7 +12,7 @@ import { fitted, GROUND, makeFire, flickerFire, woodMaterial, canvasTex } from '
 import { dustPuff } from './fx.js';
 import { makeCamper } from './people.js';
 import { makeWildlife } from './wildlife.js';
-import { makeExtras, extrasKeepOut, extraSpots } from './extras.js';
+import { makeExtras, extrasKeepOut, extraSpots, DECOR } from './extras.js';
 import * as sfx from './sound.js';
 
 const KIND = { red: 'fire', orange: 'tent', green: 'bench', blue: 'water', purple: 'chest', yellow: 'beds' };
@@ -100,14 +100,18 @@ export function campLayout(colors, size, portrait) {
 
 // how deep the camp is upright, front to back: from the back of its row behind the board to the front of the extras before
 // it (main.js frames an upright phone to centre this)
-export function campDepth(size, portrait) {
+export function campDepth(size, portrait, owned = null) {
   let z0 = Infinity, z1 = -Infinity;
   for (const s of Object.values(campLayout(Object.keys(KIND), size, portrait))) {
     for (const k of s.color === 'red' || s.color === 'yellow' ? ['fire', 'beds'] : [s.kind]) {
       for (const [, z] of edge(s.pos, s.f, PLAN[k])) (z0 = Math.min(z0, z)), (z1 = Math.max(z1, z));
     }
   }
-  for (const e of Object.values(extraSpots(size, portrait))) (z0 = Math.min(z0, e.z - e.d / 2)), (z1 = Math.max(z1, e.z + e.d / 2));
+  // (the shop's things, their row past the extras upright, once bought: the camp grows to take them in, 2026-11-14)
+  for (const [id, e] of Object.entries(extraSpots(size, portrait))) {
+    if (DECOR.includes(id) && owned && !owned.includes(id)) continue;
+    (z0 = Math.min(z0, e.z - e.d / 2)), (z1 = Math.max(z1, e.z + e.d / 2));
+  }
   return [z0, z1];
 }
 
@@ -313,7 +317,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
     chain.position.y = 0.2;
     pot.add(chain);
     out.push(pop(place(s, pot, 0, 0.42, 0), 0.35));
-    say('pot', 0.4, 1, 0.35);
+    say('drop', 0.32, 0.8, 0.35);   // (a low wooden knock: the metal pot's clang was "like squashing a tin can", Oleg 2026-11-14)
     return out;
   }
   function woodpile(s, a0, b0) {
@@ -1109,7 +1113,16 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   const wildlife = makeWildlife(scene, models, story.size, campKeepOut(story.size), () => Object.values(workers).map((w) => w.pos));
   // (signs: where the far side's gate banners stand, board.js: the bunting passes behind them)
   const signs = L.gates.filter((g) => g.side === 'top').map((g) => [board.ox + g.at, board.ox + g.at + g.len]);
-  const extras = makeExtras(scene, models, { ox: board.ox, oz: board.oz, w: board.W, h: board.H, signs }, story.size, portrait, story.extras || [], fx);
+  // the pets' ground (the shop's, extras.js): the camp's free ground in view, off the board and its frame, clear of every
+  // place (the builds', the extras'), on a half-cell grid; free(x, z) for the way between two points
+  const W = story.size.w / 2, H = story.size.h / 2, keep = campKeepOut(story.size).filter((k) => k.portrait === portrait);
+  const area = portrait ? [-W - 1.3, W + 1.3, -H - 3.2, H + 5.4] : [-W - 5.3, W + 5.3, -H - 3.4, H + 1.7];
+  const free = (x, z) => x >= area[0] && x <= area[1] && z >= area[2] && z <= area[3]
+    && !(x > board.ox - 1.4 && x < board.ox + board.W + 1.4 && z > board.oz - 1.4 && z < board.oz + board.H + 1.4)   // (off the gates' mats too)
+    && keep.every((k) => k.gap(x, z) > 0.35);
+  const points = [];
+  for (let x = area[0]; x <= area[1]; x += 0.5) for (let z = area[2]; z <= area[3]; z += 0.5) if (free(x, z)) points.push([x, z]);
+  const extras = makeExtras(scene, models, { ox: board.ox, oz: board.oz, w: board.W, h: board.H, signs }, story.size, portrait, story.extras || [], fx, { points, free });
 
   function update(dt, t, dusk, state, moves = 0, onBoard = null) {
     for (const w of Object.values(workers)) {
@@ -1160,7 +1173,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       wtr.position.y += (want - wtr.position.y) * Math.min(1, dt * 2);
     }
     wildlife.update(dt, t, dusk);
-    extras.update(dt, t, dusk);
+    extras.update(dt, t, dusk, state);
   }
 
   return {

@@ -18,8 +18,8 @@ import { makeWorld, plantForest, natureMaterial, LOW } from './world.js';
 import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, wallModel, SUPPLY, GROUND } from './board.js';
 import { makeParticles, dustPuff, unpackBurst } from './fx.js';
 import { makeCamp, campKeepOut, campDepth } from './camp.js';
-import { EXTRAS, earned } from './extras.js';
-import { drawTrail, drawExtras, nextExtra, icon } from './trail.js';
+import { drawTrail, drawShop, icon, COIN } from './trail.js';
+import { ITEMS, item, SHOP_MODELS, winCoins, loadWallet, nextItem } from './shop.js';
 import { makeWeather, KINDS } from './weather.js';
 import * as sfx from './sound.js';
 import { makeEmber, makeBubble } from './ember.js';
@@ -91,9 +91,11 @@ try {
 // a level won opens the next one (2026-11-09: levels 21-30 came after level 20, the last until then, where `reached` stopped)
 for (const [k, n] of Object.entries(best)) if (n > 0) reached = Math.max(reached, Math.min(Number(k) + 1, LIST.length - 1));
 const starTotal = () => (q.has('stars') ? Number(q.get('stars')) || 0 : Object.values(best).reduce((s, n) => s + n, 0));
-// what the last win earned (the win card shows it): extras new to the camp, stars more than the level's best; and the total
-// the HUD shows, which counts the new stars in as they fly to it
-let fresh = [], gained = 0, shownTotal = starTotal();
+// the camp shop's wallet (shop.js, 2026-11-14): coins, and what the camp has (it used to be what the stars' total earned)
+const wallet = loadWallet(store, q, starTotal());
+// what the last win earned (the win card shows it): stars more than the level's best, the coins it paid; the total the HUD
+// shows, which counts the new stars in as they fly to it; fresh: a thing just bought (the camera goes to it, spotlight)
+let fresh = [], gained = 0, paid = 0, shownTotal = starTotal();
 let levelIndex = Math.min(Math.max((Number(q.get('level')) || (q.has('proto') ? 5 : q.has('playtest') && !q.has('seed') ? 1 : reached + 1)) - 1, 0), LIST.length - 1);
 const $ = (id) => document.getElementById(id);
 const clamp = THREE.MathUtils.clamp;
@@ -114,9 +116,9 @@ const models = {
   width: (n) => Math.max(sizes.get(n)?.x || 1, sizes.get(n)?.z || 1),
   heightAbove: (n) => sizes.get(n)?.top || 1,
 };
-async function loadModels() {
-  const loader = new GLTFLoader();
-  const load = (n, url, nature) => loader.loadAsync(url).then((g) => {
+const gltfLoader = new GLTFLoader();
+function loadModel(n, url, nature) {
+  return gltfLoader.loadAsync(url).then((g) => {
     g.scene.traverse((m) => {
       if (!m.isMesh) return;
       m.castShadow = m.receiveShadow = true;
@@ -130,13 +132,20 @@ async function loadModels() {
     sizes.set(n, { x: s.x, y: s.y, z: s.z, top: box.max.y });
     gltfs.set(n, g);
   }).catch((e) => console.warn('model', n, e));
-  const all = KENNEY.length + PEOPLE.length + NATURE.length;
+}
+// the shop's models (shop.js SHOP_MODELS) for these things, those not loaded yet: at the start the camp's own, the rest when
+// bought (a few hundred kB the player may never need)
+const shopModels = (ids) => ids.flatMap((id) => Object.entries(SHOP_MODELS[id] || {})).filter(([n]) => !gltfs.has(n)).map(([n, f]) => [n, `assets/models/shop/${f}`]);
+const ensureShop = (id) => Promise.all(shopModels([id]).map(([n, url]) => loadModel(n, url)));
+async function loadModels() {
+  const own = shopModels(wallet.owned), all = KENNEY.length + PEOPLE.length + NATURE.length + own.length;
   let done = 0;
   const tick = (p) => p.then(() => ($('loadBar') && ($('loadBar').style.width = `${4 + (96 * ++done) / all}%`)));
   await Promise.all([
-    ...KENNEY.map((n) => tick(load(n, `assets/models/${n}.glb`))),
-    ...PEOPLE.map((n) => tick(load(n, `assets/models/people/${n}.glb`))),
-    ...NATURE.map((n) => tick(load(n, `assets/nature/${n}.glb`, true))),
+    ...KENNEY.map((n) => tick(loadModel(n, `assets/models/${n}.glb`))),
+    ...PEOPLE.map((n) => tick(loadModel(n, `assets/models/people/${n}.glb`))),
+    ...NATURE.map((n) => tick(loadModel(n, `assets/nature/${n}.glb`, true))),
+    ...own.map(([n, url]) => tick(loadModel(n, url))),
   ]);
 }
 
@@ -148,6 +157,18 @@ let spotlit = false, spotAt = null, unlockUntil = 0;
 // the warm-up is won in half a minute and its card was a place to stop)
 let flow = false, flowAt = 0;
 const FLOW_SECS = 3;
+// every other win at the edge of the player's progress does the same, a little slower and with "Play again" and "Show me"
+// still there: its "Next level" fills over AUTO_SECS and goes on unless the player presses anything on the card first
+// (CrazyGames 2026-11-13: once the warm-up flowed on, desktop players past one minute went from 31% to 50% and playtime from
+// 1:47 to 5:00; the win card is where players leave, Oleg "1 - yes", 2026-11-14). stayPut (?stay, BD3.stay()) holds it, for
+// checks that let a won level settle
+const AUTO_SECS = 5;
+let stayPut = q.has('stay');
+// a level's card (its new rule, tonight's crates) goes on by itself too: "Let's go" fills over INTRO_SECS; "Wait" under it,
+// or any press on the card, stops it there to read (Oleg, 2026-11-14: "add auto continue on those popups as well … add an
+// option for the user to stay more and read")
+const INTRO_SECS = 8;
+let introAt = 0;
 // a heavy crate picked up: which, and when (its way blinks on the ground for a moment: board.way); and the heavy crates still
 // to show theirs as the level starts (step()), the first time it is set up in this visit
 let blinkI = -1, blinkAt = 0, wayQueue = null;
@@ -173,7 +194,7 @@ function story(k) {
     prior[c] = total[c];
     if (!colors.includes(c)) colors.push(c);
   }
-  return q.has('proto') ? null : { colors, prior, total, size: SIZE, count, extras: earned(starTotal()) };
+  return q.has('proto') ? null : { colors, prior, total, size: SIZE, count, extras: wallet.owned.slice() };
 }
 
 function cellCenter(i, x, y) {
@@ -204,7 +225,9 @@ function load() {
   spotAt = null;
   unlockUntil = 0;
   flow = false;
-  flowAt = 0;
+  flowAt = introAt = 0;
+  cardBack = false;
+  $('cardWait').hidden = $('introWait').hidden = true;
   blinkI = -1;
   const heavy = L.blocks.map((b, i) => (b.axis ? i : -1)).filter((i) => i >= 0);
   wayQueue = heavy.length && !waysShown.has(levelIndex) && !film && !cover ? { list: heavy, at: null } : null;
@@ -222,7 +245,7 @@ function load() {
   endAt = wonAt = cheered = 0;
   celebrate = 0;
   fresh = [];
-  gained = 0;
+  gained = paid = 0;
   shownTotal = starTotal();
   crates = L.blocks.map((b, i) => {
     // two padlocks or more: each lock and its key carry the same number (playtest 2026-10-29, level 16: both locks yellow, two
@@ -427,14 +450,20 @@ function steer(gx, gy) {
   moved(blocked);
 }
 
-// stuck, with the finger on a cell the crate could reach by the most direct way there (a corner taken a little early, or a
-// crate held off its middle, playtest 2026-10-24): it goes there by itself along the free cells, quickly but visibly. Never
-// round an obstacle (a path longer than straight across and along), so a crate pushed past a rock still stops at it.
+// stuck, with the finger on a cell the crate can reach (a corner taken a little early, a crate held off its middle, playtest
+// 2026-10-24; or a quick swipe that heads for the cell and leaves the way round a rock to the crate, Oleg 2026-11-14: "they
+// get stuck if i drag them faster"): it goes there by itself along the free cells, quickly but visibly. Round an obstacle
+// too, up to DETOUR cells longer than straight across and along; a longer way round (half the board) still stops it.
+const DETOUR = 6;
+function routeTo(i, cx, cy, gx, gy) {
+  const r = reach(L, pos, i, [cx, cy], darkMask(L, moves)), path = r.has(gx, gy) ? pathTo(r, gx, gy) : null;
+  return path && path.length - 1 <= Math.abs(gx - cx) + Math.abs(gy - cy) + DETOUR ? path : null;
+}
 function follow(dt) {
   const i = drag.i, b = L.blocks[i], cx = Math.round(drag.fx), cy = Math.round(drag.fy);
   const gx = clamp(Math.round(drag.tx), 0, L.w - b.w), gy = clamp(Math.round(drag.ty), 0, L.h - b.h);
-  const r = reach(L, pos, i, [cx, cy], darkMask(L, moves)), path = r.has(gx, gy) ? pathTo(r, gx, gy) : null;
-  if (!path || path.length - 1 > Math.abs(gx - cx) + Math.abs(gy - cy)) {
+  const path = routeTo(i, cx, cy, gx, gy);
+  if (!path) {
     drag.route = false;
     noWay();
     return;
@@ -1108,6 +1137,18 @@ function stoppedShort(i, spot, tx, ty) {
 
 function release() {
   if (!drag) return;
+  // let go while the crate is still on its way round by itself (follow): it finishes the way, along the free cells
+  if (drag.route) {
+    const b = L.blocks[drag.i], cx = Math.round(drag.fx), cy = Math.round(drag.fy);
+    const gx = clamp(Math.round(drag.tx), 0, L.w - b.w), gy = clamp(Math.round(drag.ty), 0, L.h - b.h);
+    const path = fits(drag.i, cx, cy, drag.occ) && routeTo(drag.i, cx, cy, gx, gy);
+    if (path) {
+      crates[drag.i].path = path.slice(1).map(([x, y]) => cellCenter(drag.i, x, y));
+      drag.fx = gx;
+      drag.fy = gy;
+    }
+    drag.route = false;
+  }
   const { i, from, before } = drag, spot = settleSpot();
   // let go in front of its own gate after bringing it there, or while still pushing into it: out it goes (a finger aims at
   // the flags, which stand above the ground, so on the near side it lets go a row short; playtest 2026-10-24)
@@ -1184,10 +1225,14 @@ function endMove(i, from, before) {
     wonAt = t;
     if (!q.has('proto') && !watching()) {
       reached = Math.max(reached, Math.min(levelIndex + 1, LIST.length - 1));
-      const had = earned(starTotal()), before = best[levelIndex] || 0;
+      const before = best[levelIndex] || 0;
       best[levelIndex] = Math.max(before, starsFor(moves));
       gained = best[levelIndex] - before;
-      fresh = earned(starTotal()).filter((id) => !had.includes(id));
+      // the win pays coins for the camp shop (shop.js winCoins): more for new stars, a little for a level won again
+      paid = winCoins(before, best[levelIndex]);
+      wallet.coins += paid;
+      wallet.save();
+      fresh = [];
       flow = !!L.warmup && !before && levelIndex + 1 < LIST.length;
       try {
         store.setItem('bd3.reached', String(reached));
@@ -1665,7 +1710,7 @@ function frameFor(w, h, kind) {
   // a newly earned extra: closer in on its place, with a little of the camp round it (on the board: the whole camp)
   if (kind === 'extra') {
     if (!spotAt) return { ...whole, dir };
-    const s = spotAt, m = 3.2;
+    const s = spotAt, m = s.pet ? 1.7 : 3.2;   // (a pet is small: closer in)
     return { ...fit([new THREE.Vector3(s.x - s.w / 2 - m, 0, s.z - s.d / 2 - m), new THREE.Vector3(s.x + s.w / 2 + m, 0, s.z + s.d / 2 + m)], 1.2), dir };
   }
   if (kind !== 'play') return { ...whole, dir };
@@ -1680,7 +1725,7 @@ function frameFor(w, h, kind) {
     // then slid along the ground so the camp's whole depth, its row behind the board to the extras in front, sits in the
     // middle of the room between the bars: a tall phone's extra height goes to the camp, not to empty ground (Oleg,
     // 2026-11-07, on an Android phone: the top crowded, the bottom bare)
-    const [z0, z1] = campDepth(SIZE, true), ends = [new THREE.Vector3(0, 1.2, z0), new THREE.Vector3(0, GROUND, z1)], look = phone.look.clone();
+    const [z0, z1] = campDepth(SIZE, true, wallet.owned), ends = [new THREE.Vector3(0, 1.2, z0), new THREE.Vector3(0, GROUND, z1)], look = phone.look.clone();
     let lo = look.z - 12, hi = look.z + 12;
     for (let k = 0; k < 20; k++) {
       look.z = (lo + hi) / 2;
@@ -1745,6 +1790,8 @@ const starsFor = (m) => (m <= L.par ? 3 : m <= L.par + 1 ? 2 : 1);
 function ui() {
   const leftMoves = Math.max(0, L.budget - moves);
   $('starTotal').textContent = shownTotal;
+  $('coinTotal').textContent = wallet.coins;
+  coinGlow();
   // the star goal up front ("Best: 9" read as somebody's score, playtest 2026-10-24)
   $('level').textContent = `Level ${levelIndex + 1}`;
   // (while "Show me" plays, or after it is skipped, the way's length: "8 moves before dark" over a stopped replay misled,
@@ -1853,10 +1900,32 @@ function intro() {
   $('introPic').innerHTML = PIC[I.pic] || bedtimePic;
   legend($('introLegend'), before);
   $('intro').classList.add('on');
+  const go = $('introGo'), counting = !stayPut && !watchUrl;
+  go.classList.remove('auto');
+  if (counting) {
+    void go.offsetWidth;   // (the fill starts over)
+    go.classList.add('auto');
+    go.style.setProperty('--fill', `${INTRO_SECS}s`);
+    introAt = t + INTRO_SECS;
+  }
+  $('introWait').hidden = !counting;
   ui();   // (no lesson tip under the card)
 }
+// stops the level card's countdown, and a won card's (its "Next level" no longer fills; "Wait" goes)
+function stopAuto() {
+  introAt = flowAt = 0;
+  $('introGo').classList.remove('auto');
+  $('cardBtns').querySelector('.auto')?.classList.remove('auto');
+  $('introWait').hidden = $('cardWait').hidden = true;
+}
+$('introWait').onclick = stopAuto;
+$('intro').addEventListener('pointerdown', (e) => introAt && !e.target.closest('#introGo') && stopAuto());
+$('intro').addEventListener('wheel', () => introAt && stopAuto(), { passive: true });
 $('introGo').onclick = () => {
   sfx.wake();
+  introAt = 0;
+  $('introGo').classList.remove('auto');
+  $('introWait').hidden = true;
   $('intro').classList.remove('on');
   try {
     store.setItem(`bd3.card${levelIndex}`, '1');
@@ -1920,7 +1989,17 @@ function showCard() {
       }
       // (instead of "Next level": three buttons do not fit a phone's card; the trail, behind the star, has every level)
       else if (ahead) button(`Back to level ${furthest + 1}`, () => busy(() => goTo(furthest)));
-      else if (!last) button('Next level', () => busy(() => goTo(levelIndex + 1)));
+      else if (!last) {
+        button('Next level', () => busy(() => goTo(levelIndex + 1)));
+        // at the edge of the player's progress: it fills and goes on by itself (AUTO_SECS)
+        if (!q.has('proto') && !watchUrl && !stayPut) {
+          const b = $('cardBtns').lastChild;
+          b.classList.add('auto');
+          b.style.setProperty('--fill', `${AUTO_SECS}s`);
+          flowAt = t + AUTO_SECS;
+        }
+      }
+      $('cardWait').hidden = !flowAt;
       if (!flow) {
         button('Play again', () => busy(load), !last);
         if (stars < 3) button('Show me', () => ((showing = true), (bot = null), busy(load)), true);
@@ -1947,11 +2026,11 @@ function showCard() {
     for (let k = 0; k < stars; k++) setTimeout(() => sfx.star(k), 350 + k * 280);
     celebrate = 3.2;
     // the camp's new extra pops up as the stars land; the card names it, or says what the next one needs
-    const total = starTotal(), next = nextExtra(total), extra = fresh.length && EXTRAS.find((e) => e.id === fresh[fresh.length - 1]);
-    if (!spotlit) for (const id of fresh) camp.extras.reveal(id, 1.3);
-    if (extra) $('cardExtra').innerHTML = `<span class="unlock">${icon(extra.id, 26)}<span>New for the camp: <b>${extra.name}</b>!</span></span>`;
-    else if (!q.has('proto')) $('cardExtra').innerHTML = next ? `★ ${total} · ${next.need} more for the ${next.name.toLowerCase()}` : `★ ${total} · every extra is in the camp`;
-    flyStars(stars - gained, stars);
+    // the coins the win paid, and the shop as a strip of its own (Oleg, 2026-11-14: the line "looks like a tooltip"): the
+    // best thing the coins buy now, its picture, price and a Buy that buys it from here; else the cheapest one still to buy
+    // with how far off it is, and the shop
+    if (!q.has('proto')) shopStrip();
+    flyStars(stars - gained, stars);    flyStars(stars - gained, stars);
   }
   $('card').classList.add('on');
   ui();
@@ -1963,17 +2042,87 @@ function showCard() {
   }
 }
 
+// a press anywhere on a win card stops its "Next level" from going on by itself (the warm-up's flow keeps going: its card
+// has nothing else to press)
+$('card').addEventListener('pointerdown', (e) => {
+  if (!flowAt || e.target.closest('.auto')) return;
+  stopAuto();
+});
+$('cardWait').onclick = stopAuto;
+
 // the camera to the camp's newly earned extra (the last, if two came at once), which pops up as it gets there
 function spotlight() {
   spotlit = true;
-  const extra = EXTRAS.find((e) => e.id === fresh[fresh.length - 1]);
+  const extra = item(fresh[fresh.length - 1]);
+  for (const id of fresh) camp.extras.reveal(id, 0.7);   // (built first: a pet's place is wherever it was put)
   spotAt = camp.extras.where(extra.id);
   setView('extra');
-  for (const id of fresh) camp.extras.reveal(id, 0.7);
   $('unlockNote').innerHTML = `${icon(extra.id, 30)}<span>New for the camp: <b>${extra.name}</b>!</span>`;
   $('unlockNote').classList.add('on');
   unlockUntil = t + 2.7;
   setTimeout(() => sfx.chime([659, 880, 1175], 0.06, 0.9), playtest ? 0 : 700);
+}
+
+// the shop (camp trail): bought, the trail closes and the camera goes to the new thing as it pops up; then back to the view
+// there was (the level, or the won level's card)
+let backView = null;
+async function buy(id) {
+  const it = item(id);
+  if (!it || wallet.has(id) || wallet.coins < it.price) return;
+  wallet.coins -= it.price;
+  wallet.owned.push(id);
+  wallet.save();
+  sfx.play('coins', 0.5);
+  coinBump();
+  $('map').classList.remove('on');
+  await ensureShop(id);
+  backView = view === 'extra' ? backView : view;
+  // bought from the won card: the card steps aside while the camera shows the new thing (it would cover it), then comes back
+  if ($('card').classList.contains('on')) {
+    $('card').classList.remove('on');
+    cardBack = true;
+  }
+  fresh = [id];
+  spotlight();
+}
+let cardBack = false;
+// the thing to offer: the dearest pet the coins buy, else the dearest thing they buy, else the cheapest still to buy
+function offer() {
+  const can = ITEMS.filter((it) => !wallet.has(it.id) && it.price <= wallet.coins), pets = can.filter((it) => it.kind === 'pet');
+  return can.length ? { it: (pets.length ? pets : can).at(-1), can: true } : { it: nextItem(wallet.owned), can: false };
+}
+function shopStrip() {
+  const o = offer(), box = $('cardExtra');
+  if (!o.it) {
+    box.innerHTML = `<div class="shopStrip"><div class="txt"><div class="earn">${COIN(20)}<b>+${paid}</b></div><div class="what">Everything is in the camp!</div></div></div>`;
+    return;
+  }
+  const { it, can } = o;
+  box.innerHTML = `<div class="shopStrip${can ? ' can' : ''}"><div class="pic">${icon(it.id, 48)}</div><div class="txt"><div class="earn">${COIN(20)}<b>+${paid}</b> coins</div>`
+    + (can ? `<div class="what"><b>${it.name}</b> for the camp · ${COIN(14)}${it.price}</div>`
+      : `<div class="what">${it.price - wallet.coins} more for the <b>${it.name.toLowerCase()}</b></div><div class="bar"><i style="width:${Math.round((100 * wallet.coins) / it.price)}%"></i></div>`)
+    + `</div><button class="${can ? 'buy' : 'shop'}">${can ? 'Buy' : 'Shop'}</button></div>`;
+  const b = box.querySelector('button');
+  b.onclick = (e) => {
+    e.stopPropagation();
+    sfx.wake();
+    if (can) buy(it.id).then(() => shopStrip());
+    else openTrail();
+  };
+  box.querySelector('.pic').onclick = () => openTrail();
+}
+function coinBump() {
+  const pill = $('coins');
+  $('coinTotal').textContent = wallet.coins;
+  coinGlow();
+  pill.classList.remove('bump');
+  void pill.offsetWidth;
+  pill.classList.add('bump');
+}
+// the coin pill glows while the coins buy something (Oleg, 2026-11-14: "can visually attract when you have money to buy")
+function coinGlow() {
+  const n = nextItem(wallet.owned);
+  $('coins').classList.toggle('can', !!n && wallet.coins >= n.price && !q.has('proto'));
 }
 
 // the stars won beyond the level's best fly from the card to the total by the trail button, counting it up as they land
@@ -2011,6 +2160,8 @@ function flyStars(from, to) {
 // ---- the camp trail (the level map): each level's stars, the total, the camp's extras; a level to play ----
 function openTrail() {
   sfx.wake();
+  // a won level's "Next level" stops counting down (the shop is a reason to stay, 2026-11-14)
+  if (flowAt || introAt) stopAuto();
   const total = starTotal(), open = Math.max(reached, levelIndex);
   $('mapTotal').textContent = total;
   $('mapMax').textContent = LIST.length * 3;
@@ -2021,13 +2172,15 @@ function openTrail() {
     if (k !== levelIndex || state !== 'play') busy(() => goTo(k));
   };
   drawTrail($('mapTrail'), { count: LIST.length, best, open, current: levelIndex, pick });
-  drawExtras($('mapExtras'), $('mapNext'), total);
+  drawShop($('mapExtras'), $('mapNext'), { owned: wallet.owned, coins: wallet.coins, buy });
+  $('mapCoins').textContent = wallet.coins;
   // the button: the first open level without stars, else the one in play
   const first = LIST.findIndex((_, k) => k <= open && !best[k]), play = first >= 0 ? first : levelIndex;
   $('mapPlay').textContent = play === levelIndex && state === 'play' ? `Back to level ${play + 1}` : `Play level ${play + 1}`;
   $('mapPlay').onclick = () => pick(play);
 }
 $('trail').onclick = openTrail;
+$('coins').onclick = openTrail;
 $('setTrail').onclick = openTrail;
 $('mapClose').onclick = () => $('map').classList.remove('on');
 
@@ -2098,9 +2251,17 @@ function step(dt) {
   if (unlockUntil && t >= unlockUntil) {
     unlockUntil = 0;
     $('unlockNote').classList.remove('on');
+    if (backView) setView(backView);
+    backView = null;
+    if (cardBack && state === 'won') $('card').classList.add('on');
+    cardBack = false;
   }
   // a win that earned the camp something new: the camera goes to it first, it pops up, a note names it; then the card
   // (playtest 2026-11-07, Jonas, Dan, Leo: the card covered the part of the camp where it appeared, so they missed it)
+  if (introAt && t >= introAt) {
+    introAt = 0;
+    if ($('intro').classList.contains('on')) $('introGo').click();
+  }
   if (flowAt && t >= flowAt && state === 'won') {
     flowAt = 0;
     busy(() => goTo(levelIndex + 1));
@@ -2447,8 +2608,12 @@ async function coverShot() {
 
 // a handle for automated checks: the state, and where a cell (x, y in cells, fractions allowed) is on screen in CSS pixels
 window.BD3 = {
+  // the models, and loading one more (tools/shop-icons.js); the camera's view and the place it looks at for a new thing
+  models, loadModel, view: () => ({ view, spotAt, backView }),
   state: () => ({ level: levelIndex + 1, moves, left: left(pos), state, lostTo, bedtime: nextBedtime(L, moves), dusk: duskShown, budget: L.budget, par: L.par, pos: pos.map((p) => p && p.slice()), weather: weather.kind() }),
   goTo: (k) => goTo(k - 1),
+  // a won level stays put instead of going on by itself (checks that let it settle): AUTO_SECS
+  stay: (on = true) => (stayPut = on),
   // a hidden test tab gets no resize notices until it draws (a phone turned in a check): what they would do
   resize: () => (rotateCheck(), resize(), { portrait: campPortrait, rotate: $('rotate').classList.contains('on') }),
   levels: () => LIST.length,

@@ -1,6 +1,6 @@
 // The camp trail: the level map (benchmark 2026-10-28, item 2). The levels are stops along a winding forest trail, each with
-// the stars won there; the total, and the camp's extras it earns (extras.js), the next one with how many stars it needs.
-import { EXTRAS } from './extras.js';
+// the stars won there; and the camp shop (shop.js, 2026-11-14): the coins, and what they buy for the camp.
+import { ITEMS, nextItem } from './shop.js';
 
 // the extras' icons, flat, 40 x 40
 export const ICON = {
@@ -13,13 +13,11 @@ export const ICON = {
   fish: '<rect x="3" y="6" width="34" height="3" rx="1.5" fill="#7a5530"/><g fill="#9ab4c8"><path d="M8.5 9h5l-2.5 5z"/><ellipse cx="11" cy="22" rx="3.4" ry="8.5"/><path d="M17.5 9h5l-2.5 5z"/><ellipse cx="20" cy="23" rx="3.4" ry="8.5"/><path d="M26.5 9h5l-2.5 5z"/><ellipse cx="29" cy="22" rx="3.4" ry="8.5"/></g><g fill="#2a2235"><circle cx="11" cy="28" r="1"/><circle cx="20" cy="29" r="1"/><circle cx="29" cy="28" r="1"/></g>',
   signpost: '<rect x="18.5" y="6" width="3" height="31" fill="#6a4628"/><path d="M6 8h21l4 4.5-4 4.5H6z" fill="#c89a62"/><path d="M34 19H13l-4 4.5 4 4.5h21z" fill="#c89a62"/><path d="M9 12.5h14M15 23.5h15" stroke="#4a2e16" stroke-width="1.6"/>',
 };
-export const icon = (id, size = 40) => `<svg viewBox="0 0 40 40" width="${size}" height="${size}">${ICON[id] || ''}</svg>`;
-
-// the next extra to earn at this total, and how many more stars it needs
-export function nextExtra(total) {
-  const e = EXTRAS.find((x) => x.stars > total);
-  return e ? { ...e, need: e.stars - total } : null;
-}
+// the shop's things as pictures of their models (assets/ui/shop, tools/shop-icons.js)
+// (every one of them a picture of its model since 2026-11-14, the first extras too: ICON stays for anything without one)
+export const icon = (id, size = 40) => (ITEMS.some((it) => it.id === id) ? `<img src="assets/ui/shop/${id}.png" width="${size}" height="${size}" alt="">` : `<svg viewBox="0 0 40 40" width="${size}" height="${size}">${ICON[id] || ''}</svg>`);
+// a coin
+export const COIN = (size = 20) => `<svg class="coin" viewBox="0 0 20 20" width="${size}" height="${size}" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#e9a72a"/><circle cx="10" cy="10" r="7" fill="#ffd24a"/><path d="M10 5.5l1.3 2.9 3.1.3-2.4 2 .7 3.1L10 12.2l-2.7 1.6.7-3.1-2.4-2 3.1-.3z" fill="#e9a72a"/></svg>`;
 
 // the trail: `count` stops in rows that wind back and forth; best: stars won per level (index); open: the furthest level
 // that can be played; current: the level in play; pick(k) when a stop is chosen
@@ -53,15 +51,20 @@ export function drawTrail(box, { count, best, open, current, pick }) {
   });
 }
 
-// the extras: a tile each (earned, the next one ringed, the rest dim with their price), and the line about the next one
-export function drawExtras(box, line, total) {
-  const next = nextExtra(total);
-  box.innerHTML = EXTRAS.map((e) => {
-    const has = total >= e.stars, isNext = next && next.id === e.id;
-    return `<div class="ex${has ? '' : ' no'}${isNext ? ' next' : ''}">${icon(e.id)}<div>${e.name}</div><div class="cost">${has ? '✓ in the camp' : `★ ${e.stars}`}</div></div>`;
-  }).join('');
-  const prev = [...EXTRAS].reverse().find((e) => e.stars <= total)?.stars || 0;
-  line.innerHTML = next
-    ? `<b>${next.need}</b> more ★ for the ${next.name.toLowerCase()}<div class="bar"><i style="width:${Math.round((100 * (total - prev)) / (next.stars - prev))}%"></i></div>`
-    : 'Every extra is in the camp!';
+// the shop: a tile for each thing, cheapest first; what the coins buy now lit, its price on it; what the camp has ticked; and
+// a line about the cheapest thing still to buy. buy(id) when one is pressed
+export function drawShop(box, line, { owned, coins, buy }) {
+  const next = nextItem(owned);
+  box.innerHTML = '';
+  for (const it of ITEMS) {
+    const has = owned.includes(it.id), can = !has && coins >= it.price, b = document.createElement('button');
+    b.className = `ex${has ? ' has' : can ? ' can' : ' no'}${next && next.id === it.id ? ' next' : ''}`;
+    b.innerHTML = `${icon(it.id)}<div>${it.name}</div><div class="cost">${has ? '✓ in the camp' : `${COIN(13)} ${it.price}`}</div>`;
+    b.disabled = !can;
+    b.title = has ? `${it.name}: in the camp` : can ? `Buy the ${it.name.toLowerCase()} for ${it.price} coins` : `${it.name}: ${it.price} coins`;
+    if (can) b.onclick = () => buy(it.id);
+    box.append(b);
+  }
+  line.innerHTML = !next ? 'Everything is in the camp!' : coins >= next.price ? `Pick something for the camp: it stands in every level`
+    : `<b>${next.price - coins}</b> more coins for the ${next.name.toLowerCase()}<div class="bar"><i style="width:${Math.round((100 * coins) / next.price)}%"></i></div>`;
 }
