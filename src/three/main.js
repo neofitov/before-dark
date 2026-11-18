@@ -24,6 +24,7 @@ import { makeWeather, KINDS } from './weather.js';
 import * as sfx from './sound.js';
 import { makeEmber, makeBubble } from './ember.js';
 import { freeUnused, owned } from './free.js';
+import { track, onLeave, statsOn, setStats, quiet, firstVisit } from './stats.js';
 
 const KENNEY = ['barrel-open', 'barrel', 'chest', 'bedroll', 'resource-wood', 'bucket', 'box-open', 'stump_round', 'stump_old', 'deer', 'fox'];
 const PEOPLE = ['character-male-b', 'character-female-b', 'character-male-e', 'character-male-a', 'character-female-c', 'character-female-f'];
@@ -211,6 +212,13 @@ function cellCenter(i, x, y) {
   return new THREE.Vector3(board.ox + x + b.w / 2, 0, board.oz + y + b.h / 2);
 }
 
+// play statistics (stats.js, Oleg 2026-11-18): each level's start and end, and where the player was when the page went away,
+// with the level's tries, hints and undos
+const tries = {};
+let lvStart = 0, hints = 0, undos = 0;
+const lvInfo = () => ({ lv: levelIndex + 1, moves, secs: Math.round((performance.now() - lvStart) / 1000), hints, undos });
+if (watchUrl || film || cover || q.has('proto')) quiet();
+
 function load() {
   let removed = [];
   if (board) {
@@ -251,6 +259,13 @@ function load() {
   pos = startPos(L);
   moves = 0;
   hist = [];
+  if (showing) track('show_me', { lv: levelIndex + 1 });
+  else {
+    tries[levelIndex] = (tries[levelIndex] || 0) + 1;
+    track('level_start', { lv: levelIndex + 1, try: tries[levelIndex], stars: best[levelIndex] || 0 });
+  }
+  lvStart = performance.now();
+  hints = undos = 0;
   state = 'play';
   drag = null;
   endAt = wonAt = cheered = 0;
@@ -1224,11 +1239,12 @@ function endMove(i, from, before) {
   hist.push(before);
   moves++;
   firstMove = false;
-  const lost = [...stranded(L, pos, moves), ...lostCrates(L, pos, moves)];
+  const bed = stranded(L, pos, moves), lost = [...bed, ...lostCrates(L, pos, moves)];
   if (lost.length) {
     // a crew went to bed with its crates still on the board: they can never reach it now, and the camp will not be ready
     state = 'lost';
     lostTo = lost[0];
+    if (!watching()) track('level_lose', { ...lvInfo(), why: bed.length ? 'bedtime' : 'dark' });
     sfx.play('heavy', 0.35, 0.55);
     endAt = t + 3.4;   // time to see the worker shut the gate
   } else if (!left(pos)) {
@@ -1245,6 +1261,7 @@ function endMove(i, from, before) {
       wallet.save();
       fresh = [];
       flow = !!L.warmup && !before && levelIndex + 1 < LIST.length;
+      track('level_win', { ...lvInfo(), par: L.par, stars: starsFor(moves), first: !before, coins: paid });
       try {
         store.setItem('bd3.reached', String(reached));
         store.setItem('bd3.stars', JSON.stringify(best));
@@ -1253,6 +1270,7 @@ function endMove(i, from, before) {
   } else if (moves >= L.budget) {
     state = 'lost';
     endAt = t + 1.6;
+    if (!watching()) track('level_lose', { ...lvInfo(), why: 'moves' });
   }
   ui();
   lookAhead();
@@ -1260,8 +1278,10 @@ function endMove(i, from, before) {
 
 function undo() {
   if (!hist.length || drag || !(state === 'play' || (state === 'lost' && lostTo !== null))) return;
+  undos++;
   if (state === 'lost') {
     // out of the dark again: the move that lost the crate is taken back
+    track('undo_loss', { lv: levelIndex + 1, moves });
     state = 'play';
     lostTo = null;
     endAt = 0;
@@ -1385,6 +1405,7 @@ canvas.addEventListener('pointerleave', () => !drag && (canvas.style.cursor = ''
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 $('restart').onclick = () => {
   sfx.wake();
+  if (state === 'play' && moves > 0 && !watching()) track('restart', lvInfo());
   showing = false;   // (a "Show me" skipped, then Restart: the player's own try, not the replay again)
   busy(load);
 };
@@ -1394,13 +1415,16 @@ $('undo').onclick = () => {
 };
 $('hintBtn').onclick = () => {
   sfx.wake();
-  if (!showing) return hint();
+  if (!showing) {
+    hints++;
+    return hint();
+  }
   skipCard();
 };
 // settings (playtest 2026-10-28: published games all have sound and music apart, and a panel): sound, music, how to play,
 // restart
 function settingsUi() {
-  for (const [id, on] of [['setSound', sfx.soundOn()], ['setMusic', sfx.musicOn()]]) {
+  for (const [id, on] of [['setSound', sfx.soundOn()], ['setMusic', sfx.musicOn()], ['setStats', statsOn()]]) {
     $(id).classList.toggle('off', !on);
     $(id).querySelector('b').textContent = on ? 'on' : 'off';
   }
@@ -1420,12 +1444,17 @@ $('setMusic').onclick = () => {
   sfx.setMusic(!sfx.musicOn());
   settingsUi();
 };
+$('setStats').onclick = () => {
+  setStats(!statsOn());
+  settingsUi();
+};
 $('setHelp').onclick = () => {
   $('settings').classList.remove('on');
   $('howto').classList.add('on');
 };
 $('setRestart').onclick = () => {
   $('settings').classList.remove('on');
+  if (state === 'play' && moves > 0 && !watching()) track('restart', lvInfo());
   showing = false;
   busy(load);
 };
@@ -2112,6 +2141,7 @@ async function buy(id) {
   const was = wallet.coins;
   wallet.coins -= it.price;
   wallet.owned.push(id);
+  track('buy', { id, price: it.price, lv: reachedLevel() });
   if (it.line === 'pet') wallet.pet = id;
   wallet.save();
   const ready = ensureShop(id);   // (a pet's model loads while the coins fly)
@@ -2325,6 +2355,7 @@ function openTrail() {
   openMap('trail');
 }
 function openShop(id) {
+  track('shop_open', { lv: levelIndex + 1, coins: wallet.coins });
   openMap('shop', id);
 }
 $('trail').onclick = openTrail;
@@ -2896,6 +2927,8 @@ window.BD3 = {
 await loadModels();
 // the forest keeps out of every place the camp can have (Oleg: a bed stood in a tree)
 const forest = plantForest(scene, models, SIZE.w / 2 + 2.2, SIZE.h / 2 + 2.2, 7, campKeepOut(SIZE));
+track('session_start', { returning: !firstVisit, reached: reached + 1, stars: starTotal(), coins: wallet.coins, w: innerWidth, h: innerHeight, loadMs: Math.round(performance.now()) });
+onLeave(() => ({ ...lvInfo(), state, reached: reached + 1 }));
 load();
 weather = makeWeather(scene, fx, { hx: SIZE.w / 2 + 3, hz: SIZE.h / 2 + 3, bx: SIZE.w / 2, bz: SIZE.h / 2 });
 weather.set(q.get('weather') || L.weather || 'breeze');
@@ -2913,6 +2946,11 @@ try {
 } catch {}
 // the first level teaches by doing: no card first, a hand shows the first drag (teach(); the ? button still shows how to play)
 intro();
+// a new player is told about the play stats once (stats.js; CrazyGames asks games that count more than their SDK to say so)
+if (firstVisit && statsOn() && !film && !cover && !watchUrl) {
+  $('statsNote').classList.add('on');
+  setTimeout(() => $('statsNote').classList.remove('on'), 12000);
+}
 // a returning player starts on the camp trail (a new one goes straight into level 1)
 if (reached > 0 && (!playtest || q.has('seed')) && !film && !cover && !watchUrl && !q.has('level') && !q.has('proto')) openTrail();
 if (film || cover) {
