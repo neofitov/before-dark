@@ -128,3 +128,13 @@ export function gateLeaf(level, g) {
 
 export const startPos = (level) => level.blocks.map((b) => [b.x, b.y]);
 export const left = (pos) => pos.reduce((n, p) => n + (p ? 1 : 0), 0);
+// the crates that have left, in the order they went: hist, the positions before each move so far (the 3D game's undo
+// history), pos, the positions now (the 3D game lays its camp out again mid-level from this: main.js relayout)
+export function outOrder(hist, pos) {
+  const out = [];
+  hist.forEach((before, k) => {
+    const after = hist[k + 1] || pos;
+    before.forEach((p, i) => p && !after[i] && out.push(i));
+  });
+  return out;
+}

@@ -370,9 +370,11 @@ export function slotPieces(lights, flag, fire, toTent, toBench) {
     }
   }
   if (lights >= 1) out.push(['lights', bulbs(left.clone().setY(left.y + 1.75), right.clone().setY(right.y + 1.75), 18, 0.35)]);
+  // (each from the nearer pole: on a wide screen the tent can stand above the campfire in a column down the board's side)
+  const from = (p) => (p.distanceTo(left) <= p.distanceTo(right) ? left : right).clone().setY(left.y + 1.75);
   if (lights >= 2) {
-    if (toTent) out.push(['lightsT', bulbs(left.clone().setY(left.y + 1.75), toTent, 12, 0.3)]);
-    if (toBench) out.push(['lightsB', bulbs(right.clone().setY(right.y + 1.75), toBench, 12, 0.3)]);
+    if (toTent) out.push(['lightsT', bulbs(from(toTent), toTent, 12, 0.3)]);
+    if (toBench) out.push(['lightsB', bulbs(from(toBench), toBench, 12, 0.3)]);
   }
   if (flag) {
     const f = at(box(0.75, 0.45, 0.015, std(0xffffff, { map: flagTex() })), left.x + 0.4, left.y + 2.32, left.z);

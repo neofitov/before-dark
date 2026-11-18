@@ -6,7 +6,7 @@
 // instead, so tests never mix with real players; ?stats=live sends from anywhere. Settings has a switch ("bd.stats" = "off").
 const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\]|192\.168\.)/.test(location.hostname) || /[?&]playtest\b/.test(location.search);
 const ENDPOINT = LOCAL && !/[?&]stats=live\b/.test(location.search) ? null : 'https://bd-stats.neofitov.workers.dev/e';
-const VERSION = '8185554';   // the release build writes the commit here (tools/release.mjs)
+const VERSION = 'c9e9028';   // the release build writes the commit here (tools/release.mjs)
 const HOST = /crazygames\.com$/.test(location.hostname) ? 'cg' : /github\.io$/.test(location.hostname) ? 'pages' : LOCAL ? 'local' : 'other';
 
 let store;
@@ -113,13 +113,5 @@ document.addEventListener('click', (e) => {
   const w = where();
   track('card', { card: b.closest('#intro') ? 'level' : 'end', press: b.textContent.trim().replace(/\s+/g, ' ').slice(0, 24), lv: w.lv, state: w.state });
 }, true);
-
-// the "turn your phone upright" screen (slice.html #rotate): when it shows and goes
-const rotate = document.getElementById('rotate');
-if (rotate) {
-  let on = rotate.classList.contains('on');
-  new MutationObserver(() => {
-    const now = rotate.classList.contains('on');
-    if (now !== on) track('rotate_card', { on: (on = now), w: innerWidth, h: innerHeight });
-  }).observe(rotate, { attributes: true, attributeFilter: ['class'] });
-}
+// (a screen that changes shape within a level: main.js sends `relayout`. The "turn your phone upright" screen and its
+// rotate_card event went on 2026-11-18: a phone on its side plays)

@@ -28,11 +28,11 @@ const PILE = { fire: [-0.85, 0.55, 'log'], tent: [0, -0.35, 'box'], bench: [1.05
 // screen) are in layout.js
 export { PLAN } from './layout.js';
 
-// the camp's sites for a level: { colour: { pos, f (towards the board), r (its right), kind, color, lean } }. A wide screen: the
-// fixed places round the game's largest board (`size`); a phone held upright: the places main.js worked out for this level
-// and screen (layout.js uprightLayout; without them, for a common phone)
-export function campLayout(colors, size, portrait, upright = null) {
-  const raw = portrait ? upright || uprightLayout(size, colors, { w: 390, h: 844 }).sites : wideLayout(colors, size), sites = {};
+// the camp's sites for a level: { colour: { pos, f (towards the board), r (its right), kind, color, lean } }: the places main.js
+// worked out for this level and screen (layout.js uprightLayout, wideFit: laid); without them, a phone held upright has them
+// for a common phone, a wide screen the old fixed places round the game's largest board (`size`)
+export function campLayout(colors, size, portrait, laid = null) {
+  const raw = laid || (portrait ? uprightLayout(size, colors, { w: 390, h: 844 }).sites : wideLayout(colors, size)), sites = {};
   for (const color of colors) {
     const s = raw[color];
     if (!s) continue;
@@ -49,25 +49,29 @@ export function placesKeepOut(raw, portrait) {
     color, kind, portrait, x: s.x, z: s.z, gap: (x, z) => rectGap(s, kind, x, z),
   })));
 }
-// every place the camp can have: the wide screen's round the largest board (`size`), the upright layouts given (main.js: every
-// level's on this screen), and the extras' places (extras.js)
-export function campKeepOut(size, uprights = []) {
-  return [...placesKeepOut(wideLayout(Object.keys(KIND), size), false), ...uprights.flatMap((u) => placesKeepOut(u, true)), ...extrasKeepOut(size)];
+// every place the camp can have: the old fixed places round the largest board (`size`), the layouts worked out from the screen
+// (main.js: every level's on this screen, upright and on its side: [{ sites, portrait }], marked fitted), and the extras'
+// places (extras.js)
+export function campKeepOut(size, laid = []) {
+  return [...placesKeepOut(wideLayout(Object.keys(KIND), size), false), ...laid.flatMap((l) => placesKeepOut(l.sites, l.portrait).map((k) => ({ ...k, fitted: true }))), ...extrasKeepOut(size)];
 }
 
 // story: what the game's levels bring ({ colors: the camp's parts so far, prior: { colour: crates brought by earlier levels },
 // total: { colour: crates in the whole game }, size: the largest board, extras: what the stars have earned (extras.js),
-// upright: on a phone held upright, the places main.js worked out for this level and screen with the camera that frames them
-// ({ sites, cam, screen, view }: layout.js uprightLayout) ); without it, this level alone
+// upright, wide: the places main.js worked out for this level and screen with the camera that frames them ({ sites, cam,
+// screen, view }: layout.js uprightLayout on a phone held upright, wideFit on a wide screen), played: the level so far when
+// the camp is made again mid-level for a screen that changed shape (main.js relayout: { moves, delivered: { colour: [the
+// crates delivered this level, in order, as their workers' handles] } }) ); without it, this level alone
 export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   const added = [], pops = [], drops = [];
   const scene = { add: (...o) => (added.push(...o), world.add(...o)), remove: (...o) => world.remove(...o) };
   const spots = board.spots;
   story ||= { colors: Object.keys(spots), prior: {}, total: Object.fromEntries(Object.entries(spots).map(([c, s]) => [c, s.total])), size: L };
-  const sites = campLayout(story.colors, story.size, portrait, story.upright?.sites);
+  const played = story.played || null;
+  const laid = portrait ? story.upright : story.wide, sites = campLayout(story.colors, story.size, portrait, laid?.sites);
   const M = materials();
   // the ground of this camp's own places (the animals and the pets keep off it)
-  const plain = story.upright?.sites || Object.fromEntries(Object.entries(sites).map(([c, s]) => [c, { x: s.pos.x, z: s.pos.z, f: { x: s.f.x, z: s.f.z } }]));
+  const plain = laid?.sites || Object.fromEntries(Object.entries(sites).map(([c, s]) => [c, { x: s.pos.x, z: s.pos.z, f: { x: s.f.x, z: s.f.z } }]));
   const ownGround = [...placesKeepOut(plain, portrait), ...extrasKeepOut(story.size).filter((k) => k.portrait === portrait)];
 
   // the camp's beds: four places round the campfire, feet to the fire. The bed maker builds proper beds there (BUILD.beds);
@@ -549,9 +553,20 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   // the slots round the fire (tiers.js slotPieces): the string lights and the camp flag
   const slots = new Map();
   function reslot(fresh) {
-    const fire = sites.red;
-    const want = fire ? slotPieces(look.lights || 0, !!look.flag, (a, y, b) => fire.pos.clone().addScaledVector(fire.r, a).addScaledVector(fire.f, b).setY(GROUND + y),
-      sites.orange && sites.orange.pos.clone().addScaledVector(sites.orange.f, -0.74).setY(GROUND + 0.95), sites.green && sites.green.pos.clone().addScaledVector(sites.green.f, -0.45).setY(GROUND + 1.42)) : [];
+    const fire = sites.red, at = (a, y, b) => fire.pos.clone().addScaledVector(fire.r, a).addScaledVector(fire.f, b).setY(GROUND + y);
+    // (the strings out to the tent and the workshop only where they stand near the campfire, never over the board: on a wide
+    // screen they can stand in the columns down the board's sides, the campfire behind the board or down the other side)
+    const near = (p) => {
+      if (!p) return null;
+      const q = [at(2.45, 0, -1.95), at(-2.45, 0, -1.95)].sort((u, v) => u.distanceTo(p) - v.distanceTo(p))[0];
+      for (let k = 0; k <= 20; k++) {
+        const x = q.x + ((p.x - q.x) * k) / 20, z = q.z + ((p.z - q.z) * k) / 20;
+        if (Math.abs(x) < L.w / 2 + 0.6 && Math.abs(z) < L.h / 2 + 0.6) return null;
+      }
+      return Math.hypot(p.x - q.x, p.z - q.z) <= 6.5 ? p : null;
+    };
+    const want = fire ? slotPieces(look.lights || 0, !!look.flag, at, near(sites.orange && sites.orange.pos.clone().addScaledVector(sites.orange.f, -0.74).setY(GROUND + 0.95)),
+      near(sites.green && sites.green.pos.clone().addScaledVector(sites.green.f, -0.45).setY(GROUND + 1.42))) : [];
     const keys = new Set(want.map((x) => x[0]));
     for (const [k, o] of slots) if (!keys.has(k)) (scene.remove(o), slots.delete(k));
     for (const [k, o] of want) {
@@ -608,18 +623,34 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   // a crew back late waits out beyond its gate, clear of the camp's places and the other workers (upright, a far gate's
   // forest edge is the camp's row behind the board: 2026-11-07, the tent crew stood on the bed maker)
   const homes = Object.values(sites).map((x) => workSpot(x));
+  // (clear of the extras' old ground too upright; on a wide screen with places worked out from it nothing stands on theirs, the
+  // shop's pets roam, and the columns down the board's sides cover it)
+  const extraGround = laid && !portrait ? [] : Object.values(extraSpots(story.size, portrait));
   function awayFrom(s) {
     const clear = (p) => homes.every((h) => h.distanceTo(p) > 1.1) && Object.values(sites).every((x) => {
       const { across, towards } = PLAN[x.kind], d = p.clone().sub(x.pos), a = d.dot(x.r), b = d.dot(x.f);
       return Math.hypot(Math.max(0, across[0] - a, a - across[1]), Math.max(0, towards[0] - b, b - towards[1])) > 0.3;
-    }) && Object.values(extraSpots(story.size, portrait)).every((e) => Math.hypot(Math.max(0, Math.abs(p.x - e.x) - e.w / 2), Math.max(0, Math.abs(p.z - e.z) - e.d / 2)) > 0.3);
-    for (const out of [2.7, 2.2, 3.2]) {
+    }) && extraGround.every((e) => Math.hypot(Math.max(0, Math.abs(p.x - e.x) - e.w / 2), Math.max(0, Math.abs(p.z - e.z) - e.d / 2)) > 0.3);
+    // (with places worked out from the screen, the first such spot the camera shows between the HUD's bars, a little further
+    // out if need be: on a wide screen a column down the board's side can fill the ground beside a side gate, its free end
+    // under the bottom bar, 2026-11-18; or nearer the gate, down to just past the ground where its crates land (none land
+    // while the gate is shut): upright, beyond a side gate was off the screen's side, on a tablet too, 2026-11-18; a phone's
+    // board fills its width, and there the crew is still out of sight beyond it)
+    const cam = laid && uprightCamera(laid.screen, laid.cam.d, laid.cam.lz, laid.view);
+    const seen = (p) => !cam || [GROUND, GROUND + 0.8].every((y) => {
+      const [px, py] = cam.project(p.x, y, p.z);
+      return Math.abs(px) < 0.94 && py < cam.top - 0.03 && py > cam.bottom + 0.03;
+    });
+    let first = null;
+    for (const out of cam ? [2.7, 2.2, 3.2, 3.7, 4.2, 1.7, 1.2, 0.6] : [2.7, 2.2, 3.2]) {
       for (const side of [0.6, -0.6, 1.2, -1.2, 1.8, -1.8, 2.4, -2.4, 3, -3]) {
         const p = s.pos.clone().addScaledVector(s.out, out).addScaledVector(s.side, side).setY(GROUND);
-        if (clear(p)) return p;
+        if (!clear(p)) continue;
+        if (seen(p)) return p;
+        first ||= p;
       }
     }
-    return s.pos.clone().addScaledVector(s.out, 2.7).addScaledVector(s.side, 0.6).setY(GROUND);
+    return first || s.pos.clone().addScaledVector(s.out, 2.7).addScaledVector(s.side, 0.6).setY(GROUND);
   }
   for (const [color, site] of Object.entries(sites)) {
     const s = spots[color], before = story.prior[color] || 0, all = story.total[color] || (s ? s.total : 0);
@@ -640,14 +671,26 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
         tag(site, site.stage - 1, make(site));
       }
     }
-    for (let k = p0; k < pops.length; k++) Object.assign(pops[k], { t: 1, dusted: true });
     site.prebuilt = added.slice(a0);
+    // made again mid-level (a screen that changed shape): what this level's crates built so far stands too, each crate's
+    // stages kept as its worker keeps them (site.history), so an undo takes them down again (cancel)
+    for (const crate of played?.delivered?.[color] || []) {
+      const n = site.plan[site.got] || 1, pieces = [];
+      for (let k = 0; k < n; k++) {
+        const make = BUILD[site.kind][site.stage] || extra(site.kind);
+        site.stage++;
+        pieces.push(...(tag(site, site.stage - 1, make(site)) || []).flat().filter(Boolean));
+      }
+      site.got++;
+      (site.history ||= []).push({ crate, pieces, stages: n });
+    }
+    for (let k = p0; k < pops.length; k++) Object.assign(pops[k], { t: 1, dusted: true });
     if (site.fire) site.fire.size = fireSize(site.stage);
     site.tier = look[site.kind] || 0;
     redress(site);
     quiet = false;
-    const home = workSpot(site).setY(GROUND);
-    const w = { color, site, camper, home, pos: home.clone(), heading: Math.atan2(site.pos.x - home.x, site.pos.z - home.z), queue: [], job: null, path: [], phase: s ? 'wait' : 'home', t: 0, done: !s, beat: Object.keys(workers).length * 2.3 };
+    const home = workSpot(site).setY(GROUND), done = !s || (!!played && site.got >= site.total);
+    const w = { color, site, camper, home, pos: home.clone(), heading: Math.atan2(site.pos.x - home.x, site.pos.z - home.z), queue: [], job: null, path: [], phase: done ? 'home' : 'wait', t: 0, done, beat: Object.keys(workers).length * 2.3 };
     // bedtime (twist b): this crew turns in after a set move: the gate's leaf, and a tag over the worker with the moves left
     const g = L.gates.find((x) => x.color === color && x.closeAt != null), late = L.gates.find((x) => x.color === color && x.openAt != null);
     // a crew back late (2026-10-28): out at the forest's edge beyond their gate, which stays shut until they are back; a tag on
@@ -676,6 +719,23 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
       w.blanket.castShadow = true;
       w.blanket.visible = false;
       scene.add(w.blanket);
+    }
+    // made again mid-level: the gate as the rules have it after these moves (a swing under way finishes at once), a crew past
+    // its bedtime asleep in its bed, a late crew back at its work, or waiting by its gate on the move before it is due
+    if (played && w.door) {
+      const away = late && played.moves < late.openAt, abed = g && played.moves >= g.closeAt;
+      w.door.set(away || abed ? 1 : 0);
+      if (late && !away) {
+        w.pos.copy(home);
+        w.phase = done ? 'home' : 'wait';
+      } else if (away && played.moves >= late.openAt - 1) {
+        w.pos.copy(w.door.handle(1).setY(GROUND));
+        w.awayAt = w.pos.clone();
+      }
+      if (abed) {
+        w.phase = 'asleep';
+        w.pos.copy(w.bed.side).setY(GROUND);
+      }
     }
     w.camper.root.position.copy(w.pos);
     w.camper.tool?.(look.tools || 0);
@@ -1171,10 +1231,11 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   const signs = L.gates.filter((g) => g.side === 'top').map((g) => [board.ox + g.at, board.ox + g.at + g.len]);
   // the pets' ground (the shop's, extras.js): the camp's free ground in view, off the board and its frame, clear of every
   // place (the builds', the extras'), on a half-cell grid; free(x, z) for the way between two points
-  // (upright, the ground the camera shows between the bars, a pet's height up: they stay in view)
-  const W = story.size.w / 2, H = story.size.h / 2, up = story.upright;
-  const cam = portrait && up && uprightCamera(up.screen, up.cam.d, up.cam.lz, up.view);
-  const area = cam ? [-12, 12, -14, 14] : portrait ? [-W - 1.3, W + 1.3, -H - 3.2, H + 5.4] : [-W - 5.3, W + 5.3, -H - 3.4, H + 1.7];
+  // (with the places worked out from the screen, upright or wide, the ground the camera shows between the bars, a pet's height
+  // up: they stay in view)
+  const W = story.size.w / 2, H = story.size.h / 2;
+  const cam = laid && uprightCamera(laid.screen, laid.cam.d, laid.cam.lz, laid.view);
+  const area = cam ? [-16, 16, -14, 14] : portrait ? [-W - 1.3, W + 1.3, -H - 3.2, H + 5.4] : [-W - 5.3, W + 5.3, -H - 3.4, H + 1.7];
   const inView = (x, z) => {
     if (!cam) return true;
     const [px, py] = cam.project(x, GROUND + 0.6, z), [, py0] = cam.project(x, GROUND, z);

@@ -12,13 +12,13 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { LEVELS } from '../slide/levels.js';
 import { CAMPAIGN } from './campaign.js';
-import { reach, pathTo, exitGate, exitSpot, startPos, left, gateOpen, stranded, nextBedtime, locked } from '../slide/model.js';
+import { reach, pathTo, exitGate, exitSpot, startPos, left, gateOpen, stranded, nextBedtime, locked, outOrder } from '../slide/model.js';
 import { darkMask, lostCrates } from '../slide/dark.js';
 import { makeWorld, plantForest, natureMaterial, LOW } from './world.js';
 import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, wallModel, SUPPLY, GROUND } from './board.js';
 import { makeParticles, dustPuff, unpackBurst } from './fx.js';
 import { makeCamp, campKeepOut, placesKeepOut } from './camp.js';
-import { uprightLayout, uprightFrame, doorLines, VIEW } from './layout.js';
+import { uprightLayout, uprightFrame, doorLines, VIEW, wideFit, wideFrame, wideToday, wideView, phoneCap } from './layout.js';
 import { drawTrail, drawShop, drawFeature, icon, COIN } from './trail.js';
 import { item, SHOP_MODELS, winCoins, loadWallet, nextItem, forSale, campLook, LINES, PETS, ITEMS } from './shop.js';
 import { makeWeather, KINDS } from './weather.js';
@@ -205,8 +205,9 @@ const uprightKept = new Map();
 // of a crew that turns in early, the shop's string lights and flag on their poles, owned or for sale; a new player's first
 // levels have none of them, and the row behind is narrower without it: their small boards come closer)
 const POLES = Math.min(...ITEMS.filter((it) => it.line === 'lights' || it.line === 'flag').map((it) => it.open));
+const bedsAt = (k, colors) => colors.includes('yellow') || LIST[k].gates.some((g) => g.closeAt != null) || wallet.tier('lights') > 0 || wallet.tier('flag') > 0 || reachedLevel() >= POLES;
 function uprightFor(k, colors, w, h) {
-  const Lk = LIST[k], beds = colors.includes('yellow') || Lk.gates.some((g) => g.closeAt != null) || wallet.tier('lights') > 0 || wallet.tier('flag') > 0 || reachedLevel() >= POLES;
+  const Lk = LIST[k], beds = bedsAt(k, colors);
   const key = `${k}|${w}x${h}|${colors.join(',')}|${beds}`;
   if (!uprightKept.has(key)) {
     const view = { ...VIEW, elev: UPRIGHT };
@@ -214,27 +215,56 @@ function uprightFor(k, colors, w, h) {
   }
   return uprightKept.get(key);
 }
-// The forest keeps out of every place the camp can have (Oleg: a bed stood in a tree): the wide screen's, and upright every
-// level's on this screen (a screen on its side: on that screen turned upright). It is planted once at the start (merged per
-// material, world.js); a level laid out on a screen that makes a place the forest was not planted round (a window made
-// taller, a phone that turned) plants it again round that too
+// the camp's places on a wide screen for level k on a screen w x h (layout.js wideFit; 2026-11-18, Oleg: the landscape camp
+// to fit the screen as the phone's does), and the camera framing them, never further back from the board than the old
+// framing (wideToday); kept as the upright ones are, with the camera for any other size the screen takes within the level
+let wide = null, relayAt = 0;
+const wideKept = new Map();
+function wideFor(k, colors, w, h) {
+  const Lk = LIST[k], beds = bedsAt(k, colors);
+  const key = `${k}|${w}x${h}|${colors.join(',')}|${beds}`;
+  if (!wideKept.has(key)) {
+    const screen = { w, h }, view = wideView(Lk, screen), today = wideToday(Lk, colors, screen, view, SIZE);
+    wideKept.set(key, { ...wideFit(Lk, colors, screen, { doors: doorLines(Lk), view, beds, today, size: SIZE }), screen, view, colors, frames: new Map() });
+  }
+  return wideKept.get(key);
+}
+// (the screen changed size within the level, still wide: the same places framed again, no further back than the old framing
+// on that screen)
+function wideCamFor(w, h) {
+  if (wide.screen.w === w && wide.screen.h === h) return wide.cam;
+  const key = `${w}x${h}`;
+  if (!wide.frames.has(key)) {
+    const screen = { w, h }, view = wideView(L, screen);
+    wide.frames.set(key, wideFrame(L, wide.sites, screen, view, Math.max(wideToday(L, wide.colors, screen, view, SIZE).depth, phoneCap(wide.colors, screen, SIZE) || 0)));
+  }
+  return wide.frames.get(key);
+}
+// The forest keeps out of every place the camp can have (Oleg: a bed stood in a tree): every level's on this screen, upright
+// and on its side (a phone or a tablet can turn, a window change shape: on this screen turned the other way; since
+// 2026-11-18 a phone on its side plays too, no longer asked to turn), and the old fixed places round the largest board. It is
+// planted once at the start (merged per material, world.js); a level laid out on a screen that makes a place the forest was
+// not planted round (a window made taller, a phone that turned) plants it again round that too
 const forestRound = [];
 function forestPlaces(w, h) {
   const [pw, ph] = h > w ? [w, h] : [h, w];
-  return LIST.map((_, k) => uprightFor(k, story(k)?.colors || [], pw, ph).sites);
+  return LIST.flatMap((_, k) => {
+    const colors = story(k)?.colors || [];
+    return [{ sites: uprightFor(k, colors, pw, ph).sites, portrait: true }, { sites: wideFor(k, colors, ph, pw).sites, portrait: false }];
+  });
 }
-// (round the upright places with a little room to spare: a screen a little taller or narrower moves them a little, and planting
-// the forest again costs a level load half a second on a computer)
+// (round the places worked out from the screen with a little room to spare: a screen a little taller or narrower moves them a
+// little, and planting the forest again costs a level load half a second on a computer)
 function plant() {
-  const keep = campKeepOut(SIZE, forestRound).map((k) => (k.portrait ? { ...k, gap: (x, z) => k.gap(x, z) - 0.3 } : k));
+  const keep = campKeepOut(SIZE, forestRound).map((k) => (k.fitted ? { ...k, gap: (x, z) => k.gap(x, z) - 0.3 } : k));
   return plantForest(scene, models, SIZE.w / 2 + 2.2, SIZE.h / 2 + 2.2, 7, keep);
 }
 // (planted again round every level's places on the new screen at once: one planting for the new shape, not one a board size)
-function clearForest(sites, w, h) {
+function clearForest(laid, w, h) {
   if (!forest) return;
-  const keep = placesKeepOut(sites, true);
+  const keep = placesKeepOut(laid.sites, laid.portrait);
   if (forest.userData.items.every((p) => keep.every((c) => c.gap(p.x, p.z) >= p.r))) return;
-  forestRound.push(sites, ...forestPlaces(w, h));
+  forestRound.push(laid, ...forestPlaces(w, h));
   scene.remove(forest);
   forest.traverse((m) => m.isMesh && m.geometry.dispose());
   forest = plant();
@@ -272,13 +302,15 @@ function load() {
   spots = board.spots;
   const [vw, vh] = viewSize();
   campPortrait = vh > vw;
-  // a phone held upright: the camp's places worked out for this level's board and this screen, with the camera that frames
-  // them (layout.js; 2026-11-18, Oleg's yes: the easier curve's small boards sat small in the middle of the phone); the forest
-  // was planted round them (or is planted again, if this screen makes a layout it has not seen)
+  // the camp's places worked out for this level's board and this screen, with the camera that frames them (layout.js): a
+  // phone held upright (2026-11-18, Oleg's yes: the easier curve's small boards sat small in the middle of the phone), a wide
+  // screen (2026-11-18, Oleg: the camp ran off the top of CrazyGames' frame on a laptop); the forest was planted round them
+  // (or is planted again, if this screen makes a layout it has not seen)
   const st = story(levelIndex);
   upright = st && campPortrait ? uprightFor(levelIndex, st.colors, vw, vh) : null;
-  if (st) st.upright = upright;
-  if (upright) clearForest(upright.sites, vw, vh);
+  wide = st && !campPortrait ? wideFor(levelIndex, st.colors, vw, vh) : null;
+  if (st) (st.upright = upright), (st.wide = wide);
+  if (upright || wide) clearForest({ sites: (upright || wide).sites, portrait: !!upright }, vw, vh);
   camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, st);
   lostTo = null;
   hinted = note = thinking = warned = null;
@@ -305,6 +337,8 @@ function load() {
   pos = startPos(L);
   moves = 0;
   hist = [];
+  // (a screen that changes shape within the level lays the camp out again without coming here, relayout: the same try)
+  clearTimeout(relayAt);
   if (showing) track('show_me', { lv: levelIndex + 1 });
   else {
     tries[levelIndex] = (tries[levelIndex] || 0) + 1;
@@ -348,7 +382,7 @@ let modelOwned = null;
 // loading indicator"): a spinner shows first, the work runs once it is on screen, and it goes after the new level's first
 // frame. Tests (?playtest) run it at once
 let busyNow = false;
-function busy(fn) {
+function busy(fn, untracked = false) {
   if (playtest || film || cover) return fn();
   if (busyNow) return;
   busyNow = true;
@@ -369,7 +403,7 @@ function busy(fn) {
       requestAnimationFrame(() => {
         busyNow = false;
         $('busy').classList.remove('on');
-        if (tr) ready(t0, { build: Math.round(tf - tb), draw: Math.round(tr - tf) });
+        if (tr && !untracked) ready(t0, { build: Math.round(tf - tb), draw: Math.round(tr - tf) });
       });
     }
   }));
@@ -1699,8 +1733,14 @@ function hop(c, i, dt) {
   dustPuff(fx.dust, c.cur.x, c.cur.z, 0.5, 0.5, 0.6);
   sfx.play('drop', 0.45, 0.95);
   sfx.home(crates.filter((x) => x.out).length - 1);   // a note of the music's chord, higher with each crate home
-  const trip = c.trip, live = () => c.trip === trip && !c.gone;
-  c.api = {
+  c.api = crateApi(c, i);
+  camp.arrived(color, c.api);
+}
+// a crate's handle for its worker (camp.js): where it is on its mat, picked up, in the hands, unpacked at the building site;
+// none of it once the crate is back on the board (undo: a new trip) or gone into the work
+function crateApi(c, i) {
+  const o = c.out, color = L.blocks[i].color, s = spots[color], trip = c.trip, live = () => c.trip === trip && !c.gone;
+  return {
     at: () => c.cur,
     // its ground on the mat (the worker stands beside it to pick it up)
     size: () => [c.b.w * c.group.scale.x, c.b.h * c.group.scale.x],
@@ -1727,7 +1767,6 @@ function hop(c, i, dt) {
       return true;
     },
   };
-  camp.arrived(color, c.api);
 }
 
 function fireflies(dt) {
@@ -1864,11 +1903,21 @@ function frameFor(w, h, kind) {
     const u = upright.screen.w === w && upright.screen.h === h ? upright.cam : uprightFrame({ w: L.w, h: L.h }, upright.sites, { w, h }, upright.view, SIZE);
     return { look: new THREE.Vector3(0, 0, u.lz), d: u.d, dir };
   }
-  // (upright with a camp laid out on its side: the phone turned after the first move; the board and the ring round it)
+  // (upright with a camp laid out on its side: the screen just turned, for the moment until relay() lays the camp out again,
+  // or while it waits for a drag to end; the board and the ring round it)
   if (portrait) {
     const ring = 1.15;
     return { ...fit([new THREE.Vector3(-L.w / 2 - ring, 0, -L.h / 2 - ring), new THREE.Vector3(L.w / 2 + ring, 0, L.h / 2 + ring)], 0.5), dir };
   }
+  // a wide screen (2026-11-18): the camera layout.js worked out with the camp's places for this level: the board framed as
+  // before or nearer, never further back from it (wideToday), the camp beside and behind it between the HUD's bars; framed
+  // again for places already laid out when the screen changes size within the level
+  if (wide) {
+    const u = wideCamFor(w, h);
+    return { look: new THREE.Vector3(0, 0, u.lz), d: u.d, dir };
+  }
+  // (on its side with a camp laid out upright, a tablet just turned until relay() lays it out again, and the prototype's
+  // levels: the old framing)
   // (a short wide screen, the CrazyGames frame on a laptop at 462 px: hardly zoomed out at all, the board as big as it goes,
   // the camp running off the top and bottom; the board was 200 px there with 26 px cells, playtest 2026-11-09)
   // (there, the board and a little over a cell round it, its gates' mouths, not the camp spots out in front)
@@ -1895,38 +1944,71 @@ function setView(kind) {
 }
 
 function resize() {
-  rotateCheck();
   if (!L) return;
   const [w, h] = viewSize();
-  // turned before the first move: the camp laid out again for the new shape (its places differ upright and on its side)
-  // (a level card still counting down starts its count again, Wait and all: load() stopped it and left the card up with a
-  // full button that never went, QA 2026-11-14, UI-3; one the player held stays held)
-  if (h > w !== campPortrait && moves === 0 && state === 'play' && !drag && !watching() && !film && !cover) {
-    const recount = $('intro').classList.contains('on') && introAt > 0;
-    return busy(() => {
-      load();
-      if (recount) intro();
-    });
-  }
   if (film || cover) renderer.setPixelRatio(1);
   renderer.setSize(w, h, false);
   fitCamera(w, h);
   const ps = renderer.getDrawingBufferSize(new THREE.Vector2()).y / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
   for (const p of Object.values(fx)) p.setScale(ps);
+  // the screen changed shape (a phone or a tablet turned, a window resized, CrazyGames' full screen and back): framed again at
+  // once, the places as they are (frameFor); once the size has settled, the camp laid out again for it wherever that puts
+  // the places elsewhere, before or after the first move (relay)
+  clearTimeout(relayAt);
+  const laid = upright || wide;
+  if (laid && !(laid.screen.w === w && laid.screen.h === h) && !film && !cover) relayAt = setTimeout(relay, 300);
+}
+// (the size settled: the places this screen gives against the ones laid out; another shape always gives others)
+function relay() {
+  relayAt = 0;
+  const [w, h] = viewSize(), laid = upright || wide;
+  if (!L || !laid || !w || !h || film || cover || (laid.screen.w === w && laid.screen.h === h)) return;
+  if (h > w === campPortrait) {
+    const colors = story(levelIndex).colors, next = campPortrait ? uprightFor(levelIndex, colors, w, h) : wideFor(levelIndex, colors, w, h);
+    if (JSON.stringify(next.sites) === JSON.stringify(laid.sites)) return;
+  }
+  // not with a crate in hand (the player's, or "Show me"'s between its moves), while the camera shows a thing just bought (or
+  // one a win earned), or while a level is being set up: asked again a moment later (a level's end lays out again too, under
+  // its card: the end frame shows the camp it has built)
+  if (drag || view === 'extra' || busyNow) return void (relayAt = setTimeout(relay, 400));
+  busy(relayout, true);
+}
+// The camp laid out again within a level for a screen that changed shape (Oleg, 2026-11-18, "build 1-4": after the first move
+// only the camera used to move, and a tablet turned upright had the camp off both sides, a phone turned on its side the camp
+// off the top and bottom): the places worked out for the new screen (layout.js) and the camp made there anew as far as it
+// has got, behind "setting up camp". The board, the crates, the moves, the bedtime gates, the dusk and the undo history stay;
+// what this level has delivered so far stands built (a crate still on its way to its mat or in a worker's hands arrives at
+// once: makeCamp's played), the crews past bedtime asleep in their beds. The same try (no level_start): the play stats count
+// the turn as a relayout
+function relayout() {
+  const [w, h] = viewSize(), st = story(levelIndex);
+  if (!st) return;
+  // the crates delivered so far, in the order they went out (the moves' history), each with its worker's handle
+  const delivered = {};
+  for (const i of outOrder(hist, pos)) {
+    const c = crates[i];
+    c.api ||= crateApi(c, i);
+    c.gone = true;
+    c.group.visible = false;
+    (delivered[L.blocks[i].color] ||= []).push(c.api);
+  }
+  for (const s of Object.values(spots)) s.waitingCount = 0;
+  const removed = camp.dispose();
+  campPortrait = h > w;
+  upright = campPortrait ? uprightFor(levelIndex, st.colors, w, h) : null;
+  wide = campPortrait ? null : wideFor(levelIndex, st.colors, w, h);
+  st.upright = upright;
+  st.wide = wide;
+  st.played = { moves, delivered };
+  clearForest({ sites: (upright || wide).sites, portrait: campPortrait }, w, h);
+  camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, st);
+  camp.update(0, t, duskShown, state, moves, new Set(L.blocks.filter((b, k) => pos[k]).map((b) => b.color)));
+  resize();
+  tidyShadows();
+  freeUnused(scene, removed, modelOwned ||= owned([...gltfs.values()].map((g) => g.scene)));
+  if (!watching()) track('relayout', { lv: levelIndex + 1, moves, w, h, portrait: campPortrait });
 }
 new ResizeObserver(resize).observe(canvas);
-
-// a phone on its side (Oleg, 2026-11-07: "optimize the portrait mode only", then "should show on overlay blocking playing",
-// after Raccoon Gunner on jest.com): a screen over the whole game asks to turn it upright and goes when it turns. Phones
-// only: a touch screen with no hover, on its side and short; a desktop window, however shaped, plays on
-const phone = matchMedia('(hover: none) and (pointer: coarse)');
-// (a declaration, so resize() above can call it before this line has run)
-function rotateCheck() {
-  $('rotate').classList.toggle('on', phone.matches && innerWidth > innerHeight && innerHeight < 560 && !film && !cover);
-}
-addEventListener('resize', rotateCheck);
-matchMedia('(orientation: portrait)').addEventListener?.('change', rotateCheck);
-rotateCheck();
 
 const starsFor = (m) => (m <= L.par ? 3 : m <= L.par + 1 ? 2 : 1);
 function ui() {
@@ -2832,7 +2914,7 @@ if (playtest) {
       }
       // in the page's own order: the settings, cards and the trail over the game's buttons
       const z = (el) => Number(getComputedStyle(el).zIndex) || 0;
-      for (const el of [$('hud'), $('hint'), $('ember'), $('hintBtn'), $('pills'), $('unlockNote'), $('card'), $('settings'), $('howto'), $('intro'), $('map'), $('rotate')].sort((a, b) => z(a) - z(b))) await paint(el);
+      for (const el of [$('hud'), $('hint'), $('ember'), $('hintBtn'), $('pills'), $('unlockNote'), $('card'), $('settings'), $('howto'), $('intro'), $('map')].sort((a, b) => z(a) - z(b))) await paint(el);
       const res = await fetch(`http://127.0.0.1:5199/${name}`, { method: 'POST', body: out.toDataURL('image/jpeg', 0.75) }).catch(() => null);
       return res && res.ok ? `look: ${out.width}x${out.height}; page x = image x * ${(1 / k).toFixed(3)}, page y = image y * ${(1 / k).toFixed(3)}; played ${(played / 1000).toFixed(1)} s` : 'look failed';
     },
@@ -2934,8 +3016,11 @@ window.BD3 = {
   goTo: (k) => goTo(k - 1),
   // a won level stays put instead of going on by itself (checks that let it settle): AUTO_SECS
   stay: (on = true) => (stayPut = on),
-  // a hidden test tab gets no resize notices until it draws (a phone turned in a check): what they would do
-  resize: () => (rotateCheck(), resize(), { portrait: campPortrait, rotate: $('rotate').classList.contains('on') }),
+  // a hidden test tab gets no resize notices until it draws (a phone turned in a check): what they would do (the camp laid
+  // out again 300 ms later, relay)
+  resize: () => (resize(), { portrait: campPortrait }),
+  // the camp made again where it is, as a screen that changed shape makes it (tools/check-bedtime.js: the level so far kept)
+  relayout: () => busy(relayout, true),
   levels: () => LIST.length,
   workers: () => camp.workers(),
   screen(x, y) {
@@ -2950,9 +3035,12 @@ window.BD3 = {
   // for tools/check-camp.js: how far each site's builds reach, what the forest planted, the board, and the bedtime gates swung open
   campReach: () => camp.reach(),
   forest: () => forest.userData.items,
-  keepOut: () => campKeepOut(SIZE, [...forestRound, ...(upright ? [upright.sites] : [])]),
-  // the camp's places upright on this screen and the camera framing them (layout.js), null on a wide screen
-  layout: () => upright && { sites: upright.sites, cam: upright.cam, breath: upright.breath, pulled: upright.pulled, screen: upright.screen },
+  keepOut: () => campKeepOut(SIZE, [...forestRound, ...(upright || wide ? [{ sites: (upright || wide).sites, portrait: !!upright }] : [])]),
+  // the camp's places on this screen and the camera framing them (layout.js): upright, or wide (arrange: which of layout.js
+  // ARRANGE; capped: at the old framing, the far places tucked under the top bar; depth and cap: the camera's distance from
+  // the board's middle, and the old framing's)
+  layout: () => (upright && { portrait: true, sites: upright.sites, cam: upright.cam, breath: upright.breath, pulled: upright.pulled, screen: upright.screen })
+    || (wide && { portrait: false, sites: wide.sites, cam: wide.cam, breath: wide.breath, arrange: wide.arrange, capped: wide.capped, depth: wide.depth, cap: wide.cap, screen: wide.screen, view: wide.view }),
   board: () => ({ ox: board.ox, oz: board.oz, w: L.w, h: L.h, gates: L.gates }),
   campBoxes: () => camp.boxes(),
   // the camp itself (its sites: pos, f, r, prebuilt and built pieces), for picture tools (tier mock-ups, 2026-11-14)
