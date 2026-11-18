@@ -116,6 +116,93 @@ export function solveTimed(level, { maxAside = 4, maxStates = 800000, from = nul
   return { par: null, states };
 }
 
+// Can the level still be cleared from a position in play, within `limit` moves in all (the moves before dark)? Ember's dead-end
+// check asks only that (main.js lookAhead, in a worker): no best way, no path back, so it keeps far less per position than
+// solveTimed and proves dead ends that need many more positions (2026-11-18: two dead first moves on level 16, old level 7,
+// took 159,000 and 166,000 of solveTimed's, past the check's cap). Depth-first by the level's rules and clock: a crate that
+// can leave only leaves, the crews going to bed soonest first; a crew with more crates on the board than moves to its bedtime
+// (counted with the crews before it) can't make it. Each position shown to fail is kept (one short string), with the moves it
+// failed at: with no crew back late and no dark, gates only shut, so it fails later too. from: { pos, moves }; maxStates
+// and until (a performance.now() time) give up. { ok: true | false | null (gave up), states }
+export function canFinish(level, { from, limit, maxStates = 1000000, until = 0 }) {
+  const n = level.blocks.length, W = level.w, at = darkTimes(level), dark = !!(level.dark && level.dark.length);
+  const mono = !level.gates.some((g) => g.openAt != null) && !dark;
+  const due = level.blocks.map((b) => Math.min(Infinity, ...level.gates.filter((g) => g.color === b.color && g.closeAt != null).map((g) => g.closeAt)));
+  // after which move each crate can never leave (its colour's gates all shut for the night: model.js stranded), Infinity: never
+  const shut = level.blocks.map((b) => (level.gates.some((g) => g.color === b.color && g.closeAt == null) ? Infinity : Math.max(-1, ...level.gates.filter((g) => g.color === b.color).map((g) => g.closeAt))));
+  const beds = level.gates.filter((g) => g.closeAt != null && !level.gates.some((o) => o.color === g.color && o.closeAt == null)).sort((a, b) => a.closeAt - b.closeAt);
+  const lost = (pos, moves) => {
+    for (let i = 0; i < n; i++) {
+      const p = pos[i];
+      if (!p) continue;
+      if (shut[i] <= moves) return true;
+      if (!dark) continue;
+      const b = level.blocks[i];
+      for (let j = 0; j < b.h; j++) for (let k = 0; k < b.w; k++) if (at[(p[1] + j) * W + p[0] + k] <= moves) return true;
+    }
+    return false;
+  };
+  // (each crew counted once, at its soonest bedtime still to come: a bit each)
+  const crew = [...new Set(level.blocks.map((b) => b.color))], bit = (c) => 1 << crew.indexOf(c), colorBit = level.blocks.map((b) => bit(b.color)), bedBit = beds.map((g) => bit(g.color));
+  const lateForBed = (pos, moves) => {
+    let need = 0, counted = 0;
+    for (let k = 0; k < beds.length; k++) {
+      if (beds[k].closeAt <= moves) continue;
+      if (!(counted & bedBit[k])) {
+        counted |= bedBit[k];
+        for (let i = 0; i < n; i++) if (pos[i] && colorBit[i] === bedBit[k]) need++;
+      }
+      if (need > beds[k].closeAt - moves) return true;
+    }
+    return false;
+  };
+  // a position as one number: each crate's cell (or gone) a digit in base w * h + 1, so a child's is its parent's with one
+  // digit changed (a string where the number would pass 2^53)
+  const base = W * level.h + 1, exact = Math.pow(base, n) < Number.MAX_SAFE_INTEGER, unit = level.blocks.map((_, i) => Math.pow(base, i));
+  const digit = (p) => (p ? 1 + p[1] * W + p[0] : 0);
+  const keyOf = (pos) => (exact ? pos.reduce((s, p, i) => s + digit(p) * unit[i], 0) : pos.map((p) => digit(p)).join(','));
+  const failed = new Map();
+  let states = 0;
+  const GAVE_UP = {};
+  const go = (pos, moves, left, pk) => {
+    if (!left) return true;
+    if (moves + left > limit) return false;
+    const k = mono ? pk : pk + '|' + moves;
+    const was = failed.get(k);
+    if (was !== undefined && was <= moves) return false;
+    if (lost(pos, moves) || lateForBed(pos, moves)) return false;
+    if (++states > maxStates || (until && !(states & 255) && performance.now() > until)) throw GAVE_UP;
+    const mask = darkMask(level, moves), exits = [], asides = [];
+    for (let i = 0; i < n; i++) {
+      if (!pos[i]) continue;
+      const r = reach(level, pos, i, pos[i], mask);
+      const out = r.cells.find((c) => exitGate(level, i, c[0], c[1], moves));
+      if (out) exits.push(i);
+      else if (moves + left < limit) for (let c = 1; c < r.cells.length; c++) asides.push(i, c, r.cells[c]);
+    }
+    exits.sort((a, b) => due[a] - due[b]);
+    const child = (i, to) => (exact ? pk + (digit(to) - digit(pos[i])) * unit[i] : null);
+    for (const i of exits) {
+      const p = pos.slice();
+      p[i] = null;
+      if (go(p, moves + 1, left - 1, exact ? child(i, null) : keyOf(p))) return true;
+    }
+    for (let a = 0; a < asides.length; a += 3) {
+      const i = asides[a], c = asides[a + 2], p = pos.slice();
+      p[i] = c;
+      if (go(p, moves + 1, left, exact ? child(i, c) : keyOf(p))) return true;
+    }
+    failed.set(k, mono ? moves : 0);   // (not there, or there from more moves: it was looked up above)
+    return false;
+  };
+  try {
+    return { ok: go(from.pos, from.moves, from.pos.filter(Boolean).length, keyOf(from.pos)), states };
+  } catch (e) {
+    if (e === GAVE_UP) return { ok: null, states };
+    throw e;
+  }
+}
+
 // plays a list of moves by the rules, the dark and bedtime included: { ok, moves, lost: crate index or null, bad: move index or null }
 export function replay(level, moves) {
   let pos = startPos(level);

@@ -13,10 +13,10 @@ import { dustPuff } from './fx.js';
 import { makeCamper } from './people.js';
 import { makeWildlife } from './wildlife.js';
 import { makeExtras, extrasKeepOut, extraSpots } from './extras.js';
+import { KIND, PLAN, pathGap, kindsAt, rectGap, wideLayout, uprightLayout, uprightCamera } from './layout.js';
 import { dressFor, givesWay, swapsFor, slotPieces, ridgeFlags } from './tiers.js';
 import * as sfx from './sound.js';
 
-const KIND = { red: 'fire', orange: 'tent', green: 'bench', blue: 'water', purple: 'chest', yellow: 'beds' };
 // how fast the workers go (Oleg, 2026-10-24: "make the npc move and do work faster", then "even faster"; at first it was walk
 // 1.7, carry 1.35, run 3.4 and the work about 2.5 times as slow); people.js plays their clips faster to match (PACE)
 const SPEED = { walk: 3.9, carry: 3.3, run: 5.6, stroll: 1.5 };
@@ -24,117 +24,51 @@ const WORK = { pickup: 0.18, putdown: 0.14, stage: 0.2, finish: 0.3, swing: 0.4 
 // where each part piles its extras (makeCamp's extra(): a crate more than its stages): a spot in its frame and what goes there
 const PILE = { fire: [-0.85, 0.55, 'log'], tent: [0, -0.35, 'box'], bench: [1.05, 0.15, 'plank'], water: [0.05, -0.62, 'bucket'], chest: [-0.55, -0.2, 'box'], beds: [0, -2.05, 'blanket'] };
 
-// The ground each part of the camp takes once everything is built (all its stages and extras): a rectangle in its site's frame,
-// `across` along the site's right and `towards` the board, from the site's middle (the beds go round the campfire, behind
-// it). Everything else follows from these (Oleg, 2026-10-24: a bed stood in a tree; "make sure this doesn't happen in future
-// level designs, not just for beds but everything the npcs build"): each place is pushed out from the board until its
-// rectangle clears the path the workers walk round the largest board (campLayout); the forest grows round the rectangles
-// (campKeepOut, world.js plantForest); tools/check-camp.js fails when anything built pokes out of its rectangle or runs into
-// the board, the path, a gate or another part. A new build or a bigger one: widen its rectangle here.
-export const PLAN = {
-  fire: { across: [-1.15, 1.15], towards: [-1.05, 0.9] },
-  tent: { across: [-0.75, 0.95], towards: [-1.45, 1.45] },
-  bench: { across: [-1.35, 1.35], towards: [-0.7, 0.85] },
-  water: { across: [-1.1, 1.2], towards: [-0.95, 0.4] },
-  chest: { across: [-0.9, 1.35], towards: [-0.7, 0.85] },
-  beds: { across: [-2.4, 2.45], towards: [-2.5, 0.2] },
-};
-// the workers' path round a board: a rounded rectangle a step outside the frame (makeCamp's loop)
-const PATH = { out: 1.05, round: 0.7, clear: 0.35 };
-// how far a point lies outside that path round a board w x h (negative: inside it)
-function pathGap(x, z, w, h) {
-  const qx = Math.abs(x) - (w / 2 + PATH.out - PATH.round), qz = Math.abs(z) - (h / 2 + PATH.out - PATH.round);
-  return Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0) - PATH.round;
-}
-// a site's rectangle as points round its edge (world x, z)
-function edge(pos, f, plan) {
-  const r = [-f.z, f.x], pts = [];
-  const [a0, a1] = plan.across, [b0, b1] = plan.towards;
-  for (let k = 0; k <= 20; k++) {
-    const a = a0 + ((a1 - a0) * k) / 20, b = b0 + ((b1 - b0) * k) / 20;
-    for (const [u, v] of [[a, b0], [a, b1], [a0, b], [a1, b]]) pts.push([pos.x + r[0] * u + f.x * v, pos.z + r[1] * u + f.z * v]);
-  }
-  return pts;
-}
+// The places round the board and the ground each part takes (PLAN, the workers' path, the rows upright, worked out from the
+// screen) are in layout.js
+export { PLAN } from './layout.js';
 
-// where each colour's site goes: a fixed place round the board for each part of the camp, the same in every level (the camp
-// stays and grows from level to level), never in front of the board on a wide screen; out along its direction from the
-// board until all it will build clears the workers' path. `size` is the game's largest board.
-const SLOT = { landscape: { red: -90, orange: -140, green: -40, blue: 180, purple: 0, yellow: 150 } };
-// a phone held upright (Oleg, 2026-11-07: "rearrange camp top-bottom for portrait"; the board fills the phone's width and the
-// places round it were off the screen's sides): a row behind the board (the tent, the campfire with the beds behind it, the
-// workshop) and one in front of it (the water, the stores), across the width the phone shows: [x, the row's side]
-// (each row starts past the ground in front of the gates, where the crates land and the workers wait: tools/check-camp.js)
-// (the third number: further out than that. The row behind a cell further back, room to breathe round the board and the far
-// gates' workers in view: Oleg, 2026-11-07; the workshop more, level 20's red gate on the right folds its leaf back along the
-// frame towards it; the row in front half a cell. Half a cell more each when the board grew again and the workers left the
-// gates for their own places, Oleg 2026-11-07: "increase board size more and breathing space more")
-// (the fourth: how far the worker stands in from the site's middle, along its right, towards the phone's middle: the row in
-// front is nearer the camera, so its sides are cut first)
-const ROW = { red: [0, -1, 1.5], orange: [-3.7, -1, 1.5], green: [3.9, -1, 2.4], blue: [-4.1, 1, 0.9, 0.7], purple: [3.95, 1, 0.9, -0.7], yellow: [0, 1] };
-export function campLayout(colors, size, portrait) {
-  const rx = size.w / 2 + 3, rz = size.h / 2 + 2.8, sites = {};
+// the camp's sites for a level: { colour: { pos, f (towards the board), r (its right), kind, color, lean } }. A wide screen: the
+// fixed places round the game's largest board (`size`); a phone held upright: the places main.js worked out for this level
+// and screen (layout.js uprightLayout; without them, for a common phone)
+export function campLayout(colors, size, portrait, upright = null) {
+  const raw = portrait ? upright || uprightLayout(size, colors, { w: 390, h: 844 }).sites : wideLayout(colors, size), sites = {};
   for (const color of colors) {
-    const kinds = color === 'red' || color === 'yellow' ? ['fire', 'beds'] : [KIND[color]];
-    if (portrait) {
-      // straight out from the board's side until all it builds clears the path
-      const [x, side, back = 0, lean = 0] = ROW[color], f = new THREE.Vector3(0, 0, -side), at = (t) => new THREE.Vector3(x, 0, side * (size.h / 2 + t));
-      let t = 2.05 + back + Math.max(...kinds.map((k) => PLAN[k].towards[1]));
-      while (t < 6 && kinds.some((k) => edge(at(t), f, PLAN[k]).some(([px, pz]) => pathGap(px, pz, size.w, size.h) < PATH.clear))) t += 0.02;
-      sites[color] = { pos: at(t).setY(GROUND), f, r: new THREE.Vector3(-f.z, 0, f.x), kind: KIND[color], color, lean };
-      continue;
-    }
-    const a = (SLOT.landscape[color] * Math.PI) / 180, dir = new THREE.Vector3(Math.cos(a) * rx, 0, Math.sin(a) * rz);
-    const f = dir.clone().negate().normalize();
-    let t = 1;
-    while (t < 3 && kinds.some((k) => edge(dir.clone().multiplyScalar(t), f, PLAN[k]).some(([x, z]) => pathGap(x, z, size.w, size.h) < PATH.clear))) t += 0.02;
-    const pos = dir.multiplyScalar(t).setY(GROUND);
-    sites[color] = { pos, f, r: new THREE.Vector3(-f.z, 0, f.x), kind: KIND[color], color };
-  }
-  // the bed maker works at the campfire: the camp sleeps round it, in the beds she builds (Oleg, 2026-10-24)
-  if (sites.yellow) {
-    const fire = campLayout(['red'], size, portrait).red;
-    Object.assign(sites.yellow, { pos: fire.pos.clone(), f: fire.f.clone(), r: fire.r.clone() });
+    const s = raw[color];
+    if (!s) continue;
+    const f = new THREE.Vector3(s.f.x, 0, s.f.z);
+    sites[color] = { pos: new THREE.Vector3(s.x, GROUND, s.z), f, r: new THREE.Vector3(-f.z, 0, f.x), kind: KIND[color], color, lean: s.lean || 0 };
   }
   return sites;
 }
 
-// how deep the camp is upright, front to back: from the back of its row behind the board to the front of the extras before
-// it (main.js frames an upright phone to centre this)
-export function campDepth(size, portrait, owned = null) {
-  let z0 = Infinity, z1 = -Infinity;
-  for (const s of Object.values(campLayout(Object.keys(KIND), size, portrait))) {
-    for (const k of s.color === 'red' || s.color === 'yellow' ? ['fire', 'beds'] : [s.kind]) {
-      for (const [, z] of edge(s.pos, s.f, PLAN[k])) (z0 = Math.min(z0, z)), (z1 = Math.max(z1, z));
-    }
-  }
-  // (only the parts: the shop's upgrades stay in their ground, 2026-11-14; nothing stands in front of them any more)
-  return [z0, z1];
+// the ground of a set of places (sites as layout.js gives them, plain numbers): the forest and the animals keep out of it;
+// each has gap(x, z), how far a point lies outside its rectangle
+export function placesKeepOut(raw, portrait) {
+  return Object.entries(raw).filter(([c]) => !(c === 'yellow' && raw.red)).flatMap(([color, s]) => kindsAt(color, s).map((kind) => ({
+    color, kind, portrait, x: s.x, z: s.z, gap: (x, z) => rectGap(s, kind, x, z),
+  })));
 }
-
-// every place the camp can have, in both screen shapes: the ground the forest keeps out of (and the extras' places,
-// extras.js). `size` is the game's largest board; each has `gap(x, z)`, how far a point lies outside its rectangle
-export function campKeepOut(size) {
-  return [...[false, true].flatMap((portrait) => Object.values(campLayout(Object.keys(KIND), size, portrait)).map((s) => {
-    const { across, towards } = PLAN[s.kind];
-    const gap = (x, z) => {
-      const dx = x - s.pos.x, dz = z - s.pos.z, a = dx * s.r.x + dz * s.r.z, b = dx * s.f.x + dz * s.f.z;
-      return Math.hypot(Math.max(0, across[0] - a, a - across[1]), Math.max(0, towards[0] - b, b - towards[1]));
-    };
-    return { color: s.color, kind: s.kind, portrait, x: s.pos.x, z: s.pos.z, gap };
-  })), ...extrasKeepOut(size)];
+// every place the camp can have: the wide screen's round the largest board (`size`), the upright layouts given (main.js: every
+// level's on this screen), and the extras' places (extras.js)
+export function campKeepOut(size, uprights = []) {
+  return [...placesKeepOut(wideLayout(Object.keys(KIND), size), false), ...uprights.flatMap((u) => placesKeepOut(u, true)), ...extrasKeepOut(size)];
 }
 
 // story: what the game's levels bring ({ colors: the camp's parts so far, prior: { colour: crates brought by earlier levels },
-// total: { colour: crates in the whole game }, size: the largest board, extras: what the stars have earned (extras.js) });
-// without it, this level alone
+// total: { colour: crates in the whole game }, size: the largest board, extras: what the stars have earned (extras.js),
+// upright: on a phone held upright, the places main.js worked out for this level and screen with the camera that frames them
+// ({ sites, cam, screen, view }: layout.js uprightLayout) ); without it, this level alone
 export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   const added = [], pops = [], drops = [];
   const scene = { add: (...o) => (added.push(...o), world.add(...o)), remove: (...o) => world.remove(...o) };
   const spots = board.spots;
   story ||= { colors: Object.keys(spots), prior: {}, total: Object.fromEntries(Object.entries(spots).map(([c, s]) => [c, s.total])), size: L };
-  const sites = campLayout(story.colors, story.size, portrait);
+  const sites = campLayout(story.colors, story.size, portrait, story.upright?.sites);
   const M = materials();
+  // the ground of this camp's own places (the animals and the pets keep off it)
+  const plain = story.upright?.sites || Object.fromEntries(Object.entries(sites).map(([c, s]) => [c, { x: s.pos.x, z: s.pos.z, f: { x: s.f.x, z: s.f.z } }]));
+  const ownGround = [...placesKeepOut(plain, portrait), ...extrasKeepOut(story.size).filter((k) => k.portrait === portrait)];
 
   // the camp's beds: four places round the campfire, feet to the fire. The bed maker builds proper beds there (BUILD.beds);
   // a crew turning in early sleeps in its place's bed, or on a bedroll rolled out on the ground while there is none yet
@@ -1073,7 +1007,7 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   // further out to the side than they live
   function choreSpot(w) {
     const { across, towards } = PLAN[w.site.kind], site = w.site, fire = sites.red?.stage ? sites.red.pos : null;
-    const hv = w.home.clone().sub(site.pos).dot(site.f), size = story.size;
+    const hv = w.home.clone().sub(site.pos).dot(site.f), size = L;
     for (let k = 0; k < 20; k++) {
       const a = Math.random() * Math.PI * 2, r = 0.6 + Math.random() * 0.9;
       const p = w.home.clone().add(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r)), d = p.clone().sub(site.pos);
@@ -1232,16 +1166,23 @@ export function makeCamp(world, models, board, L, fx, style, portrait, story) {
   }
 
   // the deer, foxes and birds round the glade (wildlife.js)
-  const wildlife = makeWildlife(scene, models, story.size, campKeepOut(story.size), () => Object.values(workers).map((w) => w.pos));
+  const wildlife = makeWildlife(scene, models, story.size, ownGround, () => Object.values(workers).map((w) => w.pos));
   // (signs: where the far side's gate banners stand, board.js: the bunting passes behind them)
   const signs = L.gates.filter((g) => g.side === 'top').map((g) => [board.ox + g.at, board.ox + g.at + g.len]);
   // the pets' ground (the shop's, extras.js): the camp's free ground in view, off the board and its frame, clear of every
   // place (the builds', the extras'), on a half-cell grid; free(x, z) for the way between two points
-  const W = story.size.w / 2, H = story.size.h / 2, keep = campKeepOut(story.size).filter((k) => k.portrait === portrait);
-  const area = portrait ? [-W - 1.3, W + 1.3, -H - 3.2, H + 5.4] : [-W - 5.3, W + 5.3, -H - 3.4, H + 1.7];
+  // (upright, the ground the camera shows between the bars, a pet's height up: they stay in view)
+  const W = story.size.w / 2, H = story.size.h / 2, up = story.upright;
+  const cam = portrait && up && uprightCamera(up.screen, up.cam.d, up.cam.lz, up.view);
+  const area = cam ? [-12, 12, -14, 14] : portrait ? [-W - 1.3, W + 1.3, -H - 3.2, H + 5.4] : [-W - 5.3, W + 5.3, -H - 3.4, H + 1.7];
+  const inView = (x, z) => {
+    if (!cam) return true;
+    const [px, py] = cam.project(x, GROUND + 0.6, z), [, py0] = cam.project(x, GROUND, z);
+    return Math.abs(px) < 0.9 && py < cam.top - 0.04 && py0 > cam.bottom + 0.04;
+  };
   const free = (x, z) => x >= area[0] && x <= area[1] && z >= area[2] && z <= area[3]
     && !(x > board.ox - 1.4 && x < board.ox + board.W + 1.4 && z > board.oz - 1.4 && z < board.oz + board.H + 1.4)   // (off the gates' mats too)
-    && keep.every((k) => k.gap(x, z) > 0.35);
+    && ownGround.every((k) => k.gap(x, z) > 0.35) && inView(x, z);
   const points = [];
   for (let x = area[0]; x <= area[1]; x += 0.5) for (let z = area[2]; z <= area[3]; z += 0.5) if (free(x, z)) points.push([x, z]);
   const extras = makeExtras(scene, models, { ox: board.ox, oz: board.oz, w: board.W, h: board.H, signs }, story.size, portrait, look.pet ? [look.pet] : [], fx, { points, free });

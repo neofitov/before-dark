@@ -6,7 +6,7 @@
 // instead, so tests never mix with real players; ?stats=live sends from anywhere. Settings has a switch ("bd.stats" = "off").
 const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\]|192\.168\.)/.test(location.hostname) || /[?&]playtest\b/.test(location.search);
 const ENDPOINT = LOCAL && !/[?&]stats=live\b/.test(location.search) ? null : 'https://bd-stats.neofitov.workers.dev/e';
-const VERSION = 'dabd9d2';   // the release build writes the commit here (tools/release.mjs)
+const VERSION = '8185554';   // the release build writes the commit here (tools/release.mjs)
 const HOST = /crazygames\.com$/.test(location.hostname) ? 'cg' : /github\.io$/.test(location.hostname) ? 'pages' : LOCAL ? 'local' : 'other';
 
 let store;
@@ -67,19 +67,59 @@ export function flush(final = false) {
     return;
   }
   const body = JSON.stringify(batch);
-  if (final && navigator.sendBeacon) navigator.sendBeacon(ENDPOINT, body);
-  else fetch(ENDPOINT, { method: 'POST', body, keepalive: true, headers: { 'content-type': 'text/plain' } }).catch(() => {});
+  // (the browser may refuse a beacon, a full queue say: then a keepalive fetch, which also outlives the page)
+  if (final && navigator.sendBeacon && navigator.sendBeacon(ENDPOINT, body)) return;
+  fetch(ENDPOINT, { method: 'POST', body, keepalive: true, headers: { 'content-type': 'text/plain' } }).catch(() => {});
 }
 
-// where the player is when the page goes away (main.js sets it: level, moves, time in the level)
+// where the player is (main.js sets it: level, moves, time in the level, the level's state)
 let where = () => ({});
 export const onLeave = (fn) => (where = fn);
+// more to say as the page goes (perf.js: how the level so far drew), before the last batch goes
+export const beforeLeave = [];
+const leaving = () => {
+  for (const fn of beforeLeave) try { fn(); } catch { /* never in the way of leaving */ }
+};
 
 setInterval(() => flush(), 30000);
 addEventListener('pagehide', () => {
+  leaving();
   track('session_end', where());
   flush(true);
 });
+// the first day's numbers (2026-11-18): only 3 of 7 sessions sent session_end, phones in CrazyGames' frame often close without
+// it. Going hidden is the last thing such a page does, so it says where the player was; "show" when they come back
+let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') flush(true);
+  if (document.visibilityState === 'hidden') {
+    hiddenAt = performance.now();
+    leaving();
+    track('hide', where());
+    flush(true);
+  } else if (hiddenAt) {
+    track('show', { away: Math.round((performance.now() - hiddenAt) / 1000) });
+    hiddenAt = 0;
+  }
 });
+
+// the screen once the game's frame has its size (session_start's size was 0 x 0 in one frame that was still being laid out)
+setTimeout(() => track('screen', { w: innerWidth, h: innerHeight, dpr: +devicePixelRatio.toFixed(2), portrait: innerHeight > innerWidth }), 3000);
+
+// what players press on the cards: the level card (Let's go, Wait), the end card (Next level, Try again, Show me, Play
+// again...); a level that starts with no press came by itself (the cards go on after a few seconds)
+document.addEventListener('click', (e) => {
+  const b = e.target instanceof Element && e.target.closest('#card button, #intro button');
+  if (!b) return;
+  const w = where();
+  track('card', { card: b.closest('#intro') ? 'level' : 'end', press: b.textContent.trim().replace(/\s+/g, ' ').slice(0, 24), lv: w.lv, state: w.state });
+}, true);
+
+// the "turn your phone upright" screen (slice.html #rotate): when it shows and goes
+const rotate = document.getElementById('rotate');
+if (rotate) {
+  let on = rotate.classList.contains('on');
+  new MutationObserver(() => {
+    const now = rotate.classList.contains('on');
+    if (now !== on) track('rotate_card', { on: (on = now), w: innerWidth, h: innerHeight });
+  }).observe(rotate, { attributes: true, attributeFilter: ['class'] });
+}

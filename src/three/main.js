@@ -17,14 +17,18 @@ import { darkMask, lostCrates } from '../slide/dark.js';
 import { makeWorld, plantForest, natureMaterial, LOW } from './world.js';
 import { buildBoard, buildCrate, waveFlags, stencilCanvas, setCrateGlow, wallModel, SUPPLY, GROUND } from './board.js';
 import { makeParticles, dustPuff, unpackBurst } from './fx.js';
-import { makeCamp, campKeepOut, campDepth } from './camp.js';
+import { makeCamp, campKeepOut, placesKeepOut } from './camp.js';
+import { uprightLayout, uprightFrame, doorLines, VIEW } from './layout.js';
 import { drawTrail, drawShop, drawFeature, icon, COIN } from './trail.js';
-import { item, SHOP_MODELS, winCoins, loadWallet, nextItem, forSale, campLook, LINES, PETS } from './shop.js';
+import { item, SHOP_MODELS, winCoins, loadWallet, nextItem, forSale, campLook, LINES, PETS, ITEMS } from './shop.js';
 import { makeWeather, KINDS } from './weather.js';
 import * as sfx from './sound.js';
 import { makeEmber, makeBubble } from './ember.js';
 import { freeUnused, owned } from './free.js';
 import { track, onLeave, statsOn, setStats, quiet, firstVisit } from './stats.js';
+import { mark, startup, frameTime, levelPerf, resetLevel, onLevel, modelFailed, watchGl } from './perf.js';
+mark('code');   // (perf.js: the game's code is running)
+import { migrate, VERSION } from './progress.js';
 
 const KENNEY = ['barrel-open', 'barrel', 'chest', 'bedroll', 'resource-wood', 'bucket', 'box-open', 'stump_round', 'stump_old', 'deer', 'fox'];
 const PEOPLE = ['character-male-b', 'character-female-b', 'character-male-e', 'character-male-a', 'character-female-c', 'character-female-f'];
@@ -60,30 +64,13 @@ try {
     store.setItem('bd3.reached', String(seed.length));
     store.setItem('bd3.stars', JSON.stringify({ ...seed }));
     store.setItem('bd.howto', '1');
-    store.setItem('bd3.v', '2');
+    store.setItem('bd3.v', VERSION);
   }
 } catch {}
-// the warm-up (level 1 since 2026-11-10) came in front of the levels there were: progress saved before it moves one level on,
-// once (the stars won on each level, the furthest level reached, the level cards seen)
+// a save made before the levels last moved goes with them, once (progress.js): the warm-up in front (2026-11-10), the easier
+// curve (2026-11-18: stars move with their board, new boards start with none, the levels open stay open, coins and things kept)
 try {
-  if (!q.has('proto') && store.getItem('bd3.v') !== '2') {
-    // (stars that won't parse count as none: the parse used to throw before bd3.v was written, so the move ran again on the
-    // next load, onto a save made after the warm-up: QA 2026-11-14, ROBUST-1)
-    let was = {};
-    try {
-      was = JSON.parse(store.getItem('bd3.stars') || '{}') || {};
-    } catch {}
-    const moved = {};
-    for (const [k, n] of Object.entries(was)) moved[Number(k) + 1] = n;
-    if (store.getItem('bd3.stars') != null) store.setItem('bd3.stars', JSON.stringify(moved));
-    if (store.getItem('bd3.reached') != null) store.setItem('bd3.reached', String((Number(store.getItem('bd3.reached')) || 0) + 1));
-    for (let k = CAMPAIGN.length; k >= 0; k--) {
-      if (store.getItem(`bd3.card${k}`) !== '1') continue;
-      store.setItem(`bd3.card${k + 1}`, '1');
-      store.removeItem(`bd3.card${k}`);
-    }
-    store.setItem('bd3.v', '2');
-  }
+  if (!q.has('proto')) migrate(store, CAMPAIGN, { wallet: (total) => loadWallet(store, new URLSearchParams(), total) });
 } catch {}
 let reached = 0;
 try {
@@ -140,7 +127,10 @@ function loadModel(n, url, nature) {
     const box = new THREE.Box3().setFromObject(g.scene), s = box.getSize(new THREE.Vector3());
     sizes.set(n, { x: s.x, y: s.y, z: s.z, top: box.max.y });
     gltfs.set(n, g);
-  }).catch((e) => console.warn('model', n, e));
+  }).catch((e) => {
+    console.warn('model', n, e);
+    modelFailed(n);
+  });
 }
 // the shop's models (shop.js SHOP_MODELS) for these things, those not loaded yet: at the start the camp's own, the rest when
 // bought (a few hundred kB the player may never need)
@@ -158,7 +148,7 @@ async function loadModels() {
   ]);
 }
 
-let campPortrait = false, L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
+let campPortrait = false, forest = null, L, board, camp, weather, crates, pos, moves, hist, state, drag, duskShown = 0, endAt = 0, wonAt = 0, cheered = 0, t = 0, lastBump = 0, firstMove = true, spots, lostTo = null;
 sfx.logClock(() => t);   // (?soundlog: the sounds logged on the game's clock, sound.js)
 // a win that earned the camp something new: the camera has been to it (spotlight), and where it is (null: on the board)
 let spotlit = false, spotAt = null, unlockUntil = 0;
@@ -207,6 +197,49 @@ function story(k) {
   return q.has('proto') ? null : { colors, prior, total, size: SIZE, count, look: campLook(wallet) };
 }
 
+// the camp's places upright for level k on a screen w x h (layout.js uprightLayout), and the camera framing them; the same
+// level and screen give the same answer (kept: the forest asks for every level's at the start)
+let upright = null;
+const uprightKept = new Map();
+// (the beds' ground behind the campfire is kept while anything can stand there in the level: the bed maker's beds, the bedrolls
+// of a crew that turns in early, the shop's string lights and flag on their poles, owned or for sale; a new player's first
+// levels have none of them, and the row behind is narrower without it: their small boards come closer)
+const POLES = Math.min(...ITEMS.filter((it) => it.line === 'lights' || it.line === 'flag').map((it) => it.open));
+function uprightFor(k, colors, w, h) {
+  const Lk = LIST[k], beds = colors.includes('yellow') || Lk.gates.some((g) => g.closeAt != null) || wallet.tier('lights') > 0 || wallet.tier('flag') > 0 || reachedLevel() >= POLES;
+  const key = `${k}|${w}x${h}|${colors.join(',')}|${beds}`;
+  if (!uprightKept.has(key)) {
+    const view = { ...VIEW, elev: UPRIGHT };
+    uprightKept.set(key, { ...uprightLayout({ w: Lk.w, h: Lk.h }, colors, { w, h }, { doors: doorLines(Lk), view, beds, cap: SIZE }), screen: { w, h }, view });
+  }
+  return uprightKept.get(key);
+}
+// The forest keeps out of every place the camp can have (Oleg: a bed stood in a tree): the wide screen's, and upright every
+// level's on this screen (a screen on its side: on that screen turned upright). It is planted once at the start (merged per
+// material, world.js); a level laid out on a screen that makes a place the forest was not planted round (a window made
+// taller, a phone that turned) plants it again round that too
+const forestRound = [];
+function forestPlaces(w, h) {
+  const [pw, ph] = h > w ? [w, h] : [h, w];
+  return LIST.map((_, k) => uprightFor(k, story(k)?.colors || [], pw, ph).sites);
+}
+// (round the upright places with a little room to spare: a screen a little taller or narrower moves them a little, and planting
+// the forest again costs a level load half a second on a computer)
+function plant() {
+  const keep = campKeepOut(SIZE, forestRound).map((k) => (k.portrait ? { ...k, gap: (x, z) => k.gap(x, z) - 0.3 } : k));
+  return plantForest(scene, models, SIZE.w / 2 + 2.2, SIZE.h / 2 + 2.2, 7, keep);
+}
+// (planted again round every level's places on the new screen at once: one planting for the new shape, not one a board size)
+function clearForest(sites, w, h) {
+  if (!forest) return;
+  const keep = placesKeepOut(sites, true);
+  if (forest.userData.items.every((p) => keep.every((c) => c.gap(p.x, p.z) >= p.r))) return;
+  forestRound.push(sites, ...forestPlaces(w, h));
+  scene.remove(forest);
+  forest.traverse((m) => m.isMesh && m.geometry.dispose());
+  forest = plant();
+}
+
 function cellCenter(i, x, y) {
   const b = L.blocks[i];
   return new THREE.Vector3(board.ox + x + b.w / 2, 0, board.oz + y + b.h / 2);
@@ -216,7 +249,12 @@ function cellCenter(i, x, y) {
 // with the level's tries, hints and undos
 const tries = {};
 let lvStart = 0, hints = 0, undos = 0;
-const lvInfo = () => ({ lv: levelIndex + 1, moves, secs: Math.round((performance.now() - lvStart) / 1000), hints, undos });
+// and how the moves went (2026-11-18, the first day's numbers: real players ran out of moves on level 2 again and again; were
+// the moves lost to drags that went nowhere, crates stopped short, or plans?): crates picked up, drags that moved nothing,
+// drags refused (no way that side), crates stopped short of where the finger went, moves that left a crate on the board, and
+// the seconds to the first move
+let drags = 0, nowhere = 0, refused = 0, short = 0, asides = 0, t1 = null;
+const lvInfo = () => ({ lv: levelIndex + 1, moves, secs: Math.round((performance.now() - lvStart) / 1000), hints, undos, drags, nowhere, refused, short, asides, t1 });
 if (watchUrl || film || cover || q.has('proto')) quiet();
 
 function load() {
@@ -234,11 +272,19 @@ function load() {
   spots = board.spots;
   const [vw, vh] = viewSize();
   campPortrait = vh > vw;
-  camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, story(levelIndex));
+  // a phone held upright: the camp's places worked out for this level's board and this screen, with the camera that frames
+  // them (layout.js; 2026-11-18, Oleg's yes: the easier curve's small boards sat small in the middle of the phone); the forest
+  // was planted round them (or is planted again, if this screen makes a layout it has not seen)
+  const st = story(levelIndex);
+  upright = st && campPortrait ? uprightFor(levelIndex, st.colors, vw, vh) : null;
+  if (st) st.upright = upright;
+  if (upright) clearForest(upright.sites, vw, vh);
+  camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, st);
   lostTo = null;
   hinted = note = thinking = warned = null;
   hintAsk++;   // a search still running is for the last try
   lookAsk++;
+  dropLook();
   spotlit = false;
   spotAt = null;
   unlockUntil = 0;
@@ -265,7 +311,9 @@ function load() {
     track('level_start', { lv: levelIndex + 1, try: tries[levelIndex], stars: best[levelIndex] || 0 });
   }
   lvStart = performance.now();
-  hints = undos = 0;
+  hints = undos = drags = nowhere = refused = short = asides = 0;
+  t1 = null;
+  resetLevel();
   state = 'play';
   drag = null;
   endAt = wonAt = cheered = 0;
@@ -305,18 +353,33 @@ function busy(fn) {
   if (busyNow) return;
   busyNow = true;
   $('busy').classList.add('on');
+  // (the play stats: how long "setting up camp" takes, from the press to the new level on the screen, split into building
+  // the level and compiling and drawing its first frame; Oleg, 2026-11-18)
+  const t0 = performance.now();
+  let tb = 0, tf = 0, tr = 0;
   requestAnimationFrame(() => requestAnimationFrame(() => {
     try {
+      tb = performance.now();
       fn();
+      tf = performance.now();
       renderer.compile(scene, camera);
       renderer.render(scene, camera);
+      tr = performance.now();
     } finally {
       requestAnimationFrame(() => {
         busyNow = false;
         $('busy').classList.remove('on');
+        if (tr) ready(t0, { build: Math.round(tf - tb), draw: Math.round(tr - tf) });
       });
     }
   }));
+}
+// a level on the screen: how long it took, and (after a win) since the winning move: the card, its countdown and the setting up
+let wonAtMs = 0;
+function ready(t0, more = {}) {
+  const now = performance.now();
+  track('level_ready', { lv: levelIndex + 1, ms: Math.round(now - t0), ...more, ...(wonAtMs ? { sinceWin: Math.round((now - wonAtMs) / 100) / 10 } : {}) });
+  wonAtMs = 0;
 }
 
 // ---- the physical drag: the crate's footprint (in cells, fractions allowed) against walls, crates, the frame and gates ----
@@ -456,6 +519,7 @@ function slide(tx, ty) {
 }
 
 function grab(i, gx, gy) {
+  drags++;
   drag = { i, from: pos[i].slice(), before: pos.map((p) => (p ? p.slice() : null)), grabX: gx - pos[i][0], grabY: gy - pos[i][1], fx: pos[i][0], fy: pos[i][1], tx: pos[i][0], ty: pos[i][1], occ: occupancy(i), cell: pos[i].join() };
   crates[i].liftV += 2;
   sfx.play('pick', 0.5);
@@ -581,6 +645,8 @@ function hint() {
       if (ask !== hintAsk) return;
       thinking = null;
       if (at !== posKey(pos) + '|' + moves || state !== 'play') return ember.close();
+      // (the play stats: how long Ember took to answer, playtests called it slow)
+      track('hint', { lv: levelIndex + 1, ms: Math.round(performance.now() - t0), found: !!r.move, onWay, states: r.states || 0 });
       answer(r);
     }, q.has('playtest') ? 0 : Math.max(0, 1000 - (performance.now() - t0)));
   };
@@ -708,8 +774,18 @@ function backToWay() {
 // otherwise, off the level's own way, the solver looks for any way to finish in the moves left (in a worker, a second or two)
 // and, finding none, Ember says so unasked and Undo pulses. A search cut short by its time says nothing ----
 let lookWorker = null, lookAsk = 0, lookBusy = false, warned = null;
+// the dead-end check's budget: [seconds, positions] (a phone, LOW, gets more time: it is slower, and the search keeps little)
+const SEE = { full: [3, 400000], low: [4, 400000] };
+// a search still running for an earlier position is dropped (the player moved again, undid, changed level, or the level ended)
+function dropLook() {
+  if (!lookBusy) return;
+  lookWorker.terminate();
+  lookWorker = null;
+  lookBusy = false;
+}
 function lookAhead() {
   const ask = ++lookAsk, at = posKey(pos) + '|' + moves;
+  dropLook();
   if (state !== 'play' || watching() || q.has('proto') || warned === at) return;
   for (const color of new Set(L.gates.filter((g) => g.closeAt > moves).map((g) => g.color))) {
     const gates = L.gates.filter((g) => g.color === color);
@@ -718,10 +794,6 @@ function lookAhead() {
     if (n > Math.max(...gates.map((g) => g.closeAt)) - moves) return stuck(at, color);
   }
   if (posKey(pos) === wayAt(moves)) return;
-  if (lookBusy) {
-    lookWorker.terminate();
-    lookWorker = null;
-  }
   try {
     lookWorker ||= new Worker(new URL('./hint-worker.js', import.meta.url), { type: 'module' });
   } catch {
@@ -729,14 +801,19 @@ function lookAhead() {
   }
   lookBusy = true;
   lookWorker.onmessage = ({ data }) => {
-    if (data.progress != null || data.ask !== lookAsk) return;
+    if (data.ask !== lookAsk) return;
     lookBusy = false;
-    if (!data.move && !data.capped && at === posKey(pos) + '|' + moves && state === 'play' && !drag) stuck(at, null);
+    if (data.ok === false && at === posKey(pos) + '|' + moves && state === 'play' && !drag) stuck(at, null);
   };
-  // its budget (2026-11-11, CPU and memory work): it ran up to 2 s on a full core and kept up to 800k positions (about
-  // 180 MB) after every move off the way. On 214 random positions a few moves into the levels, 0.6 s and 150k still proved
-  // 129 of the 131 dead ends (most 0.62 s, about 110 MB); a phone gets 0.4 s and 80k (127 of 131)
-  lookWorker.postMessage({ ask, level: L, pos, moves, aside: L.budget - moves - left(pos), secs: LOW ? 0.4 : 0.6, states: LOW ? 80000 : 150000 });
+  // its budget: 2026-11-11 (CPU and memory work) it ran up to 2 s on a full core and kept up to 800k positions (about 180 MB)
+  // after every move off the way, so it went down to 0.6 s and 150k (a phone 0.4 s and 80k), which proved 129 of 131 dead ends
+  // on 214 random positions. 2026-11-18 (the easier curve): on level 16 (old level 7) it gave up on all 17 dead first moves
+  // (0.6 s at 70k-120k positions; proving them took the hint's search 70k-280k and 5-22 s), so Ember said nothing there. It now
+  // asks only "can it still be won" (solver.js canFinish), which keeps one number per position and nothing else: those 17
+  // take it 5,000-13,200 positions and 0.2-0.7 s, and on 248 random positions it agreed with the hint's search every time and
+  // never took more than 0.5 s. SEE's budget leaves room on a slow phone; it runs on its own thread, dropped when the player
+  // moves again
+  lookWorker.postMessage({ ask, look: true, level: L, pos, moves, aside: L.budget - moves - left(pos), secs: LOW ? SEE.low[0] : SEE.full[0], states: LOW ? SEE.low[1] : SEE.full[1] });
 }
 function stuck(at, color) {
   warned = at;
@@ -1039,6 +1116,7 @@ function noWay() {
   const i = drag.i, b = L.blocks[i], dx = drag.tx - drag.fx, dy = drag.ty - drag.fy;
   if (Math.hypot(dx, dy) < 0.45) return;
   lastNoWay = t;
+  refused++;
   // a heavy crate pulled across its skids
   if (b.axis && (b.axis === 'x' ? Math.abs(dy) > Math.abs(dx) : Math.abs(dx) > Math.abs(dy))) {
     crates[i].jig = 1;
@@ -1149,6 +1227,7 @@ function stoppedShort(i, spot, tx, ty) {
   else for (let k = 0; k < b.w; k++) cells.push([spot[0] + k, dy > 0 ? spot[1] + b.h : spot[1] - 1]);
   const hit = cells.filter(([x, y]) => blockerName(x, y));
   if (!hit.length) return;
+  short++;
   board.flash(hit);
   const what = blockerName(...hit[0]), el = $('undo');
   el.classList.remove('pulse');
@@ -1235,16 +1314,24 @@ function deliver(i, gate) {
 
 function endMove(i, from, before) {
   const p = pos[i];
-  if (p && p[0] === from[0] && p[1] === from[1]) return;
+  if (p && p[0] === from[0] && p[1] === from[1]) {
+    nowhere++;
+    return;
+  }
   hist.push(before);
   moves++;
+  if (p) asides++;
+  t1 ??= Math.round((performance.now() - lvStart) / 1000);
   firstMove = false;
   const bed = stranded(L, pos, moves), lost = [...bed, ...lostCrates(L, pos, moves)];
   if (lost.length) {
     // a crew went to bed with its crates still on the board: they can never reach it now, and the camp will not be ready
     state = 'lost';
     lostTo = lost[0];
-    if (!watching()) track('level_lose', { ...lvInfo(), why: bed.length ? 'bedtime' : 'dark' });
+    if (!watching()) {
+      track('level_lose', { ...lvInfo(), why: bed.length ? 'bedtime' : 'dark' });
+      track('level_perf', { lv: levelIndex + 1, q: lite.step, ...levelPerf() });
+    }
     sfx.play('heavy', 0.35, 0.55);
     endAt = t + 3.4;   // time to see the worker shut the gate
   } else if (!left(pos)) {
@@ -1262,6 +1349,8 @@ function endMove(i, from, before) {
       fresh = [];
       flow = !!L.warmup && !before && levelIndex + 1 < LIST.length;
       track('level_win', { ...lvInfo(), par: L.par, stars: starsFor(moves), first: !before, coins: paid });
+      track('level_perf', { lv: levelIndex + 1, q: lite.step, ...levelPerf() });
+      wonAtMs = performance.now();
       try {
         store.setItem('bd3.reached', String(reached));
         store.setItem('bd3.stars', JSON.stringify(best));
@@ -1270,7 +1359,10 @@ function endMove(i, from, before) {
   } else if (moves >= L.budget) {
     state = 'lost';
     endAt = t + 1.6;
-    if (!watching()) track('level_lose', { ...lvInfo(), why: 'moves' });
+    if (!watching()) {
+      track('level_lose', { ...lvInfo(), why: 'moves' });
+      track('level_perf', { lv: levelIndex + 1, q: lite.step, ...levelPerf() });
+    }
   }
   ui();
   lookAhead();
@@ -1763,23 +1855,19 @@ function frameFor(w, h, kind) {
   // playing: on a phone the board and its gates' paths fill the width (the crates' landing spots and the camp run off the
   // sides); on a wide screen zoomed out from the board's own frame only as far as keeps the board big (a third at most)
   // a phone upright (2026-11-07, Oleg: the camp in rows behind and in front of the board, "reduce board size just enough for
-  // the workers to be visible"): one framing for every level, the game's largest board and the ring round it where the gate
-  // workers stand across the phone's width, the camp's rows in the height left over (camp.js ROW); every level's cells are
-  // then the same size
+  // the workers to be visible"): the camera layout.js worked out with the camp's places for this level (2026-11-18: this
+  // level's board and the ring round it where the gate workers stand across the phone's width, the camp's whole depth
+  // centred between the bars, further out only when the camp would not fit, and never further out than the largest board's
+  // framing: a short phone's rows tuck under the bars as before; a smaller board comes closer); framed again for
+  // places already laid out when the screen changes shape within the level
+  if (portrait && upright) {
+    const u = upright.screen.w === w && upright.screen.h === h ? upright.cam : uprightFrame({ w: L.w, h: L.h }, upright.sites, { w, h }, upright.view, SIZE);
+    return { look: new THREE.Vector3(0, 0, u.lz), d: u.d, dir };
+  }
+  // (upright with a camp laid out on its side: the phone turned after the first move; the board and the ring round it)
   if (portrait) {
-    const ring = 1.15, phone = fit([new THREE.Vector3(-SIZE.w / 2 - ring, 0, -SIZE.h / 2 - ring), new THREE.Vector3(SIZE.w / 2 + ring, 0, SIZE.h / 2 + ring)], 0.5);
-    // then slid along the ground so the camp's whole depth, its row behind the board to the extras in front, sits in the
-    // middle of the room between the bars: a tall phone's extra height goes to the camp, not to empty ground (Oleg,
-    // 2026-11-07, on an Android phone: the top crowded, the bottom bare)
-    const [z0, z1] = campDepth(SIZE, true, wallet.owned), ends = [new THREE.Vector3(0, 1.2, z0), new THREE.Vector3(0, GROUND, z1)], look = phone.look.clone();
-    let lo = look.z - 12, hi = look.z + 12;
-    for (let k = 0; k < 20; k++) {
-      look.z = (lo + hi) / 2;
-      const sp = span(look, phone.d, ends);
-      if ((sp.y0 + sp.y1) / 2 > (top + bottom) / 2) hi = look.z;
-      else lo = look.z;
-    }
-    return { look, d: phone.d, dir };
+    const ring = 1.15;
+    return { ...fit([new THREE.Vector3(-L.w / 2 - ring, 0, -L.h / 2 - ring), new THREE.Vector3(L.w / 2 + ring, 0, L.h / 2 + ring)], 0.5), dir };
   }
   // (a short wide screen, the CrazyGames frame on a laptop at 462 px: hardly zoomed out at all, the board as big as it goes,
   // the camp running off the top and bottom; the board was 200 px there with 26 px cells, playtest 2026-11-09)
@@ -1898,44 +1986,45 @@ const PIC = {
   late: '<path d="M38 4l-9 16h18z M38 12l-11 18h22z" fill="#3e7a34"/><rect x="36.5" y="29" width="3" height="5" fill="#6a4628"/><rect x="2" y="36" width="50" height="6" rx="2" fill="#9a6a3c"/><g fill="#5a3a22"><rect x="8" y="26" width="3" height="16"/><rect x="13" y="26" width="3" height="16"/><rect x="18" y="26" width="3" height="16"/></g><rect x="6" y="25" width="17" height="3" fill="#f05a3c"/><circle cx="45" cy="47" r="3" fill="#ffd2a0"/><path d="M30 48h-8m3-3-3 3 3 3" stroke="#3e9e38" stroke-width="2.2" fill="none" stroke-linecap="round"/><circle cx="14" cy="15" r="6.5" fill="#e2f6d2" stroke="#3a2c4a" stroke-width="1.2"/><text x="14" y="18" font-size="8.5" font-weight="800" fill="#2a2238" text-anchor="middle" font-family="system-ui">4</text>',
 };
 let bedtimePic = null;
-// (each title follows "Level N: "; the warm-up, level 1, teaches by doing: no card)
+// (each title follows "Level N: "; the warm-up, level 1, teaches by doing: no card). The easier curve (2026-11-18,
+// crazygames/CURVE.md): each rule's card on its new first level (bedtime 6, long loads 11, heavy crates 13, the pond 17, the
+// padlock 19, a crew back late 23); a hard level's card says so (campaign.js `hard`: levels 10, 16, 22, 27 and 31)
 const INTRO = [
   null,
-  // (the old level 1, after the warm-up: crates to put aside; no card since 2026-11-12, the warm-up flows into it and its
-  // rule is a tip, ui())
+  // (after the warm-up: crates to put aside, its rule a tip (ui()); no card since 2026-11-12, the warm-up flows into it. Levels
+  // 3 and 4 bring new crews but no new rule: the camp shows them, no card to stop at)
   null,
-  { title: 'bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
-  { title: 'two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
+  null,
+  null,
   // (it taught dragging round corners, which level 1 already needs: playtest 2026-11-09, Leo, Maya)
   { title: 'round the rocks', rule: '<b>Rocks and stumps all over:</b> plan each crate’s way round them.', pic: 'rocks' },
-  { title: 'three early crews', rule: '<b>Three crews go to bed early.</b> Watch the numbers on the gates.' },
-  { title: 'tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.', pic: 'rocks' },
+  { title: 'bedtime', rule: '<b>Some crews go to bed early.</b> The number on a gate is the moves they have left.' },
+  { title: 'early to bed', rule: '<b>A crew turns in early again.</b> Their crates first, then the rest.' },
   { title: 'the whole camp', rule: '<b>Every crew is here:</b> all six gates.', pic: 'gates' },
+  { title: 'a bigger glade', rule: '<b>A bigger board, rocks and an early crew.</b> Plan each crate’s way.', pic: 'rocks' },
+  { title: 'two early crews', rule: '<b>Two crews go to bed early.</b> Whose crates go first?' },
   // (it said they "turn no corners in a tight spot": a rule that never bit, playtest 2026-11-07, all five)
   { title: 'long loads', rule: '<b>Long loads</b> are four cells long: to move sideways they need a gap four cells wide.', pic: 'long' },
-  { title: 'long loads at bedtime', rule: '<b>Long loads and an early crew.</b> Make room before the gate shuts.', pic: 'long' },
+  { title: 'long loads at bedtime', rule: '<b>A long load and an early crew.</b> Make room before the gate shuts.', pic: 'long' },
   { title: 'heavy crates', rule: '<b>Heavy crates run on skids:</b> they slide only along them. Pick one up to see its way.', pic: 'heavy' },
-  { title: 'heavy and long', rule: '<b>Heavy crates, a long load</b> and a crew that turns in early.', pic: 'heavy' },
+  { title: 'heavy at bedtime', rule: '<b>Two heavy crates and an early crew.</b> Clear their lines first.', pic: 'heavy' },
+  { title: 'the long way round', rule: '<b>Two long loads</b> and no clock: take your time to make room.', pic: 'long' },
+  { title: 'tight corners', rule: '<b>More rocks, two early crews.</b> Plan who goes first.', pic: 'rocks' },
   { title: 'the pond', rule: '<b>A pond fills a corner.</b> Nothing crosses the water.', pic: 'pond' },
-  { title: 'by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.', pic: 'pond' },
-  // (the lock's colour rule came only on level 16's card: playtest 2026-11-09, Ruth, Jonas)
+  { title: 'the pond at bedtime', rule: '<b>The pond, a heavy crate</b> and an early crew.', pic: 'pond' },
+  // (the lock's colour rule came only on the next padlock level's card: playtest 2026-11-09, Ruth, Jonas)
   { title: 'the padlock', rule: '<b>A padlocked crate</b> stays put until the crate with its key is out. The lock’s colour is the key crate’s.', pic: 'padlock' },
+  { title: 'find the key', rule: '<b>A padlock on a bigger board.</b> Get the key crate out first.', pic: 'padlock' },
   { title: 'keys and bedtime', rule: '<b>A padlock and an early crew.</b> Whose key goes first?', pic: 'padlock' },
-  { title: 'two padlocks', rule: '<b>Two padlocks:</b> the colour on each lock is the crate with its key.', pic: 'padlock' },
+  { title: 'every crew at once', rule: '<b>All six crews and two early ones.</b> Plan who goes first.', pic: 'gates' },
   { title: 'back late', rule: '<b>A crew is out in the forest.</b> Their gate opens when they are back.', pic: 'late' },
-  { title: 'late and early', rule: '<b>One crew back late, one to bed early.</b> Time it.', pic: 'late' },
+  { title: 'late again', rule: '<b>A crew back late</b> on a bigger board. Time their crates.', pic: 'late' },
+  { title: 'late and early', rule: '<b>One crew back late, one to bed early,</b> and a heavy crate. Time it.', pic: 'late' },
+  { title: 'by the water', rule: '<b>A bigger pond, a heavy crate</b> and two early crews.', pic: 'pond' },
+  { title: 'long and heavy', rule: '<b>Every crew, a long load, two heavy crates, a padlock</b> and two early crews.', pic: 'gates' },
+  { title: 'the key by the pond', rule: '<b>A padlock by the pond.</b> Find the key crate first.', pic: 'padlock' },
   { title: 'a long evening', rule: '<b>Pond, padlock, skids, a late crew</b> and an early one.', pic: 'gates' },
-  { title: 'all together', rule: '<b>Everything at once</b>, and every crew in camp.', pic: 'gates' },
-  // levels 21-30 (2026-11-09): no new rule, the ones there are in new pairs, each one needed
-  { title: 'heavy by the water', rule: '<b>Two heavy crates beside the pond.</b> They can’t step round anything: clear their lines first.', pic: 'heavy' },
-  { title: 'the long way round', rule: '<b>Two long loads and an early crew.</b> Open a gap four wide before they have to move.', pic: 'long' },
-  { title: 'keys on skids', rule: '<b>Two padlocks and a heavy crate.</b> Its skids decide whose key can go first.', pic: 'padlock' },
-  { title: 'late and long', rule: '<b>A crew back late, a long load</b> and a crew that turns in early.', pic: 'late' },
-  { title: 'heavy traffic', rule: '<b>Three heavy crates.</b> None of them steps aside: plan the lanes.', pic: 'heavy' },
-  { title: 'the island', rule: '<b>A big pond and a long load.</b> Little room to turn.', pic: 'pond' },
-  { title: 'night shift', rule: '<b>Two crews back late, one to bed early</b>, and a heavy crate.', pic: 'late' },
   { title: 'locked by the water', rule: '<b>A padlock, a heavy crate and the pond.</b> Whose key first?', pic: 'padlock' },
-  { title: 'long and heavy', rule: '<b>Every crew, a long load, two heavy crates</b> and two early crews.', pic: 'gates' },
   { title: 'the last night', rule: '<b>Everything at once:</b> pond, padlock, skids, a long load, a late crew and an early one.', pic: 'gates' },
 ];
 function intro() {
@@ -1949,6 +2038,8 @@ function intro() {
   if (seen && !playtest) return;
   const before = new Set(LIST.slice(0, levelIndex).flatMap((l) => l.blocks.map((b) => b.color)));
   $('introTitle').textContent = `Level ${levelIndex + 1}: ${I.title}`;
+  // a hard level says so (Oleg, 2026-11-18): a badge after the title, on a line of its own if it must
+  if (L.hard) $('introTitle').insertAdjacentHTML('beforeend', ' <span class="hard">Hard level</span>');
   $('introRule').innerHTML = I.rule;
   bedtimePic ??= $('introPic').innerHTML;
   $('introPic').innerHTML = PIC[I.pic] || bedtimePic;
@@ -2375,8 +2466,10 @@ function goTo(k) {
   bot = null;
   // (a "Show me" skipped, then another level from the camp trail: that level played itself; found 2026-11-09)
   showing = false;
+  const t0 = performance.now();
   load();
   intro();
+  requestAnimationFrame(() => requestAnimationFrame(() => ready(t0, { via: 'trail' })));
 }
 
 function step(dt) {
@@ -2496,6 +2589,7 @@ const lite = { step: LOW ? 1 : 0, alternate: LOW, typePending: false };
 function lighten(to) {
   while (lite.step < to) {
     lite.step++;
+    if (forcedQuality == null) track('quality', { step: lite.step, lv: levelIndex + 1, ms: Math.round(pace.n ? pace.sum / pace.n : 0) });
     if (lite.step === 1) {
       world.lighterShadows();
       lite.alternate = lite.typePending = true;
@@ -2530,9 +2624,13 @@ function tidyShadows() {
     if (g.boundingSphere.radius * Math.max(o.scale.x, o.scale.y, o.scale.z) < TINY) o.castShadow = false;
   });
 }
+let drawn = false;
 function frame(now) {
   const raw = now - last, dt = Math.min(raw / 1000, 0.05);
   last = now;
+  // (the play stats: the first frame ends the startup; each shown frame's time, outside setting up a level: perf.js)
+  if (!drawn) (drawn = true), startup(renderer, { q: lite.step, low: LOW });
+  else if (document.visibilityState === 'visible' && !busyNow) frameTime(raw);
   if (document.visibilityState === 'visible' && !playtest) step(dt);
   if (++tidyTick % 30 === 0) {
     tidyShadows();
@@ -2852,7 +2950,9 @@ window.BD3 = {
   // for tools/check-camp.js: how far each site's builds reach, what the forest planted, the board, and the bedtime gates swung open
   campReach: () => camp.reach(),
   forest: () => forest.userData.items,
-  keepOut: () => campKeepOut(SIZE),
+  keepOut: () => campKeepOut(SIZE, [...forestRound, ...(upright ? [upright.sites] : [])]),
+  // the camp's places upright on this screen and the camera framing them (layout.js), null on a wide screen
+  layout: () => upright && { sites: upright.sites, cam: upright.cam, breath: upright.breath, pulled: upright.pulled, screen: upright.screen },
   board: () => ({ ox: board.ox, oz: board.oz, w: L.w, h: L.h, gates: L.gates }),
   campBoxes: () => camp.boxes(),
   // the camp itself (its sites: pos, f, r, prebuilt and built pieces), for picture tools (tier mock-ups, 2026-11-14)
@@ -2925,10 +3025,15 @@ window.BD3 = {
 };
 
 await loadModels();
-// the forest keeps out of every place the camp can have (Oleg: a bed stood in a tree)
-const forest = plantForest(scene, models, SIZE.w / 2 + 2.2, SIZE.h / 2 + 2.2, 7, campKeepOut(SIZE));
+mark('models');
+watchGl(renderer.domElement);
+// the forest keeps out of every place the camp can have (Oleg: a bed stood in a tree): forestRound
+forestRound.push(...forestPlaces(...viewSize()));
+forest = plant();
 track('session_start', { returning: !firstVisit, reached: reached + 1, stars: starTotal(), coins: wallet.coins, w: innerWidth, h: innerHeight, loadMs: Math.round(performance.now()) });
 onLeave(() => ({ ...lvInfo(), state, reached: reached + 1 }));
+onLevel(() => L && { lv: levelIndex + 1, q: lite.step });
+addEventListener('pointerdown', () => track('first_input', { ms: Math.round(performance.now()) }), { once: true, capture: true });
 load();
 weather = makeWeather(scene, fx, { hx: SIZE.w / 2 + 3, hz: SIZE.h / 2 + 3, bx: SIZE.w / 2, bz: SIZE.h / 2 });
 weather.set(q.get('weather') || L.weather || 'breeze');

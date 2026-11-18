@@ -30,10 +30,11 @@ const SPOT = {
     // board (past the far gates' ground), left of the water, right of the stores
     bigtent: [-0.75, -10.75, 1.7, 1.6], logs: [0.75, -10.6, 1.3, 1.2], lamppost: [-0.15, -9.55, 0.9, 0.6], lantern: [0.15, -9.5, 0.6, 0.6],
     garden: [-5.35, -2.95, 1.5, 1.1], pumpkins: [-4.95, -1.35, 1.0, 0.8], campbench: [4.8, -4.75, 1.3, 0.6], candles: [4.95, -2.6, 0.55, 0.55] },
-  // upright (2026-11-07): between the water and the stores in front of the board (camp.js ROW), past the gates' ground
+  // upright (2026-11-07): between the water and the stores in front of the largest board, past the gates' ground (the camp's
+  // places upright are worked out from the screen since 2026-11-18, layout.js; these stay round the largest board)
   // (all 0.4 further out with the row in front, 2026-11-07)
   portrait: { hammock: [-1.45, 3.5, 2.7, 1.1], canoe: [1.45, 3.55, 2.5, 1.2], fox: [-2.4, 4.85, 0.9, 0.9], fish: [-0.75, 4.8, 1.9, 0.8], signpost: [0.95, 4.8, 1.4, 0.8], flag: [2.35, 4.8, 1.3, 0.8],
-    // the shop's things: a second row under the extras (the camp's depth counts them only once bought: camp.js campDepth)
+    // the shop's first things (2026-11-14, sold no more): a second row under the extras
     bigtent: [-3.75, 6.45, 1.7, 1.6], logs: [-2.1, 6.2, 1.3, 1.2], garden: [-0.45, 6.15, 1.5, 1.1], campbench: [1.1, 6.05, 1.3, 0.6],
     pumpkins: [2.4, 6.1, 1.0, 0.8], lamppost: [3.3, 6.0, 0.9, 0.6], lantern: [3.95, 6.0, 0.6, 0.6], candles: [4.55, 5.95, 0.55, 0.55] },
 };
