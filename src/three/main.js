@@ -206,12 +206,18 @@ const uprightKept = new Map();
 // levels have none of them, and the row behind is narrower without it: their small boards come closer)
 const POLES = Math.min(...ITEMS.filter((it) => it.line === 'lights' || it.line === 'flag').map((it) => it.open));
 const bedsAt = (k, colors) => colors.includes('yellow') || LIST[k].gates.some((g) => g.closeAt != null) || wallet.tier('lights') > 0 || wallet.tier('flag') > 0 || reachedLevel() >= POLES;
+// A frame with no room yet (hidden, collapsed or still opening as the game loads: 3 of update 11's first 27 sessions on
+// CrazyGames loaded at 0x0, and the layout's search found nothing and stopped the game before it started, 2026-11-19) gets
+// no screen-fitted places: null, and the camp stands at the old fixed places (camp.js campLayout) until the frame has a size,
+// when resize() lays it out (relay). ROOM: the shorter side the layouts are worked out for at all
+const ROOM = 200;
 function uprightFor(k, colors, w, h) {
+  if (!(Math.min(w, h) >= ROOM)) return null;
   const Lk = LIST[k], beds = bedsAt(k, colors);
   const key = `${k}|${w}x${h}|${colors.join(',')}|${beds}`;
   if (!uprightKept.has(key)) {
-    const view = { ...VIEW, elev: UPRIGHT };
-    uprightKept.set(key, { ...uprightLayout({ w: Lk.w, h: Lk.h }, colors, { w, h }, { doors: doorLines(Lk), view, beds, cap: SIZE }), screen: { w, h }, view });
+    const view = { ...VIEW, elev: UPRIGHT }, got = uprightLayout({ w: Lk.w, h: Lk.h }, colors, { w, h }, { doors: doorLines(Lk), view, beds, cap: SIZE });
+    uprightKept.set(key, got && { ...got, screen: { w, h }, view });
   }
   return uprightKept.get(key);
 }
@@ -221,11 +227,13 @@ function uprightFor(k, colors, w, h) {
 let wide = null, relayAt = 0;
 const wideKept = new Map();
 function wideFor(k, colors, w, h) {
+  if (!(Math.min(w, h) >= ROOM)) return null;
   const Lk = LIST[k], beds = bedsAt(k, colors);
   const key = `${k}|${w}x${h}|${colors.join(',')}|${beds}`;
   if (!wideKept.has(key)) {
     const screen = { w, h }, view = wideView(Lk, screen), today = wideToday(Lk, colors, screen, view, SIZE);
-    wideKept.set(key, { ...wideFit(Lk, colors, screen, { doors: doorLines(Lk), view, beds, today, size: SIZE }), screen, view, colors, frames: new Map() });
+    const got = wideFit(Lk, colors, screen, { doors: doorLines(Lk), view, beds, today, size: SIZE });
+    wideKept.set(key, got && { ...got, screen, view, colors, frames: new Map() });
   }
   return wideKept.get(key);
 }
@@ -250,7 +258,10 @@ function forestPlaces(w, h) {
   const [pw, ph] = h > w ? [w, h] : [h, w];
   return LIST.flatMap((_, k) => {
     const colors = story(k)?.colors || [];
-    return [{ sites: uprightFor(k, colors, pw, ph).sites, portrait: true }, { sites: wideFor(k, colors, ph, pw).sites, portrait: false }];
+    // (none on a frame with no room yet: the forest keeps out of the old fixed places alone, and is planted again round the
+    // screen-fitted ones once the frame has a size)
+    const up = uprightFor(k, colors, pw, ph), on = wideFor(k, colors, ph, pw);
+    return [...(up ? [{ sites: up.sites, portrait: true }] : []), ...(on ? [{ sites: on.sites, portrait: false }] : [])];
   });
 }
 // (round the places worked out from the screen with a little room to spare: a screen a little taller or narrower moves them a
@@ -1955,18 +1966,19 @@ function resize() {
   // once, the places as they are (frameFor); once the size has settled, the camp laid out again for it wherever that puts
   // the places elsewhere, before or after the first move (relay)
   clearTimeout(relayAt);
+  // (a camp at the old fixed places because the frame had no room when the level was set up: laid out once it has some)
   const laid = upright || wide;
-  if (laid && !(laid.screen.w === w && laid.screen.h === h) && !film && !cover) relayAt = setTimeout(relay, 300);
+  if ((laid ? !(laid.screen.w === w && laid.screen.h === h) : story(levelIndex)) && !film && !cover) relayAt = setTimeout(relay, 300);
 }
-// (the size settled: the places this screen gives against the ones laid out; another shape always gives others)
+// (the size settled: the places this screen gives against the ones laid out; another shape always gives others; a frame still
+// with no room keeps the places it has)
 function relay() {
   relayAt = 0;
-  const [w, h] = viewSize(), laid = upright || wide;
-  if (!L || !laid || !w || !h || film || cover || (laid.screen.w === w && laid.screen.h === h)) return;
-  if (h > w === campPortrait) {
-    const colors = story(levelIndex).colors, next = campPortrait ? uprightFor(levelIndex, colors, w, h) : wideFor(levelIndex, colors, w, h);
-    if (JSON.stringify(next.sites) === JSON.stringify(laid.sites)) return;
-  }
+  const [w, h] = viewSize(), laid = upright || wide, st = story(levelIndex);
+  if (!L || !st || !w || !h || film || cover || (laid && laid.screen.w === w && laid.screen.h === h)) return;
+  const next = h > w ? uprightFor(levelIndex, st.colors, w, h) : wideFor(levelIndex, st.colors, w, h);
+  if (!next) return;
+  if (laid && h > w === campPortrait && JSON.stringify(next.sites) === JSON.stringify(laid.sites)) return;
   // not with a crate in hand (the player's, or "Show me"'s between its moves), while the camera shows a thing just bought (or
   // one a win earned), or while a level is being set up: asked again a moment later (a level's end lays out again too, under
   // its card: the end frame shows the camp it has built)
@@ -2000,7 +2012,7 @@ function relayout() {
   st.upright = upright;
   st.wide = wide;
   st.played = { moves, delivered };
-  clearForest({ sites: (upright || wide).sites, portrait: campPortrait }, w, h);
+  if (upright || wide) clearForest({ sites: (upright || wide).sites, portrait: campPortrait }, w, h);
   camp = makeCamp(scene, models, board, L, fx, peopleStyle, campPortrait, st);
   camp.update(0, t, duskShown, state, moves, new Set(L.blocks.filter((b, k) => pos[k]).map((b) => b.color)));
   resize();

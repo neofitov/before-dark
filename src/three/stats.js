@@ -6,7 +6,7 @@
 // instead, so tests never mix with real players; ?stats=live sends from anywhere. Settings has a switch ("bd.stats" = "off").
 const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\]|192\.168\.)/.test(location.hostname) || /[?&]playtest\b/.test(location.search);
 const ENDPOINT = LOCAL && !/[?&]stats=live\b/.test(location.search) ? null : 'https://bd-stats.neofitov.workers.dev/e';
-const VERSION = 'c9e9028';   // the release build writes the commit here (tools/release.mjs)
+const VERSION = '25327dc';   // the release build writes the commit here (tools/release.mjs)
 const HOST = /crazygames\.com$/.test(location.hostname) ? 'cg' : /github\.io$/.test(location.hostname) ? 'pages' : LOCAL ? 'local' : 'other';
 
 let store;

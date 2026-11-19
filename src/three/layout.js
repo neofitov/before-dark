@@ -298,6 +298,8 @@ export function uprightLayout(board, colors, screen, { doors = [], view = VIEW, 
     rowsKept.set(key, bestRows(board, places, screen, view, beds, cap));
   }
   const best = rowsKept.get(key);
+  // (nothing fits a screen this small, whatever the breathing room: none, main.js keeps the old fixed places)
+  if (!best) return null;
 
   // the gate leaves are at fixed x: once the places' x are known, one standing behind a leaf goes further out
   const at = {};
@@ -676,6 +678,8 @@ export function wideFit(board, colors, screen, { doors = [], view = wideView(boa
     const got = wideAt(parts, board, screen, view, box, d, [GAP.sideMin, GAP.betweenMin], doors, loose);
     if (got && (!best || got.over < best.over - 1e-6)) best = { ...got, arrange: n, breath: 0, capped: true };
   }
+  // (no arrangement fits a screen this small even so: none, main.js keeps the old fixed places)
+  if (!best) return null;
   const sites = {};
   for (const c of colors) {
     const s = best.sites[placeOf(c)];
